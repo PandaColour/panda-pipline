@@ -204,8 +204,8 @@ def parse_and_print_stream(json_line):
     return ""
 
 
-def run_claude_task(work_dir, message, system_prompt=None, use_continue=False):
-    """Execute Claude CLI task in work_dir with optional --continue and --append-system-prompt."""
+def run_claude_task(work_dir, message, system_prompt=None, use_continue=False, add_dirs=None):
+    """Execute Claude CLI task in work_dir with optional --continue, --append-system-prompt, and --add-dir."""
     cmd = CLAUDE_BASE_CMD.copy()
 
     if use_continue:
@@ -213,6 +213,10 @@ def run_claude_task(work_dir, message, system_prompt=None, use_continue=False):
 
     if system_prompt:
         cmd.extend(["--append-system-prompt", system_prompt])
+
+    if add_dirs:
+        for d in add_dirs:
+            cmd.extend(["--add-dir", d])
 
     cmd.extend(["-p", message])
 

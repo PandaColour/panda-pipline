@@ -7,9 +7,10 @@ from utils import run_claude_task
 class Agent:
     """Wraps the claude CLI as a conversational agent with --continue tracking."""
 
-    def __init__(self, name, system_prompt_file, work_dir):
+    def __init__(self, name, system_prompt_file, work_dir, add_dirs=None):
         self.name = name
         self.work_dir = work_dir
+        self.add_dirs = add_dirs or []
         self.call_count = 0
         self.system_prompt = self._load_system_prompt(system_prompt_file)
 
@@ -36,5 +37,6 @@ class Agent:
             work_dir=self.work_dir,
             message=message,
             system_prompt=self.system_prompt,
-            use_continue=use_continue
+            use_continue=use_continue,
+            add_dirs=self.add_dirs
         )
