@@ -10,6 +10,21 @@ TASK = (
     "在保持a-share-agent功能不变的前提下，优化代码逻辑, 减少重复"
 )
 
+AGENTS = {
+    "developer": {
+        "name": "Python开发",
+        "prompt": "python_developer.md",
+        "work_dir": WORK_DIR,
+        "add_dirs": [],
+    },
+    "reviewer": {
+        "name": "代码Review",
+        "prompt": "code_reviewer_a_stock.md",
+        "work_dir": REVIEW_DIR,
+        "add_dirs": [WORK_DIR],
+    },
+}
+
 
 def setup_environment():
     """Initialize workspace directories."""
@@ -19,8 +34,10 @@ def setup_environment():
 
 def run_pipeline():
     """Run the Python dev → code review feedback loop."""
-    developer = Agent("Python开发", "python_developer.md", WORK_DIR)
-    reviewer = Agent("代码Review", "code_reviewer_a_stock.md", REVIEW_DIR)
+    dev_cfg = AGENTS["developer"]
+    reviewer_cfg = AGENTS["reviewer"]
+    developer = Agent(dev_cfg["name"], dev_cfg["prompt"], dev_cfg["work_dir"], add_dirs=dev_cfg["add_dirs"])
+    reviewer = Agent(reviewer_cfg["name"], reviewer_cfg["prompt"], reviewer_cfg["work_dir"], add_dirs=reviewer_cfg["add_dirs"])
 
     print("\n" + "=" * 60)
     print("💻 阶段 1: Python 开发")
