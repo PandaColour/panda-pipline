@@ -3,11 +3,11 @@ import os
 from agent import Agent
 
 
-WORK_DIR = r"D:\github\a-share-agent"
+WORK_DIR = r"D:\github\OneFingerBox\weixin"
 REVIEW_DIR = os.path.join(WORK_DIR, "_review")
 
 TASK = (
-    "在保持a-share-agent功能不变的前提下，优化代码逻辑, 减少重复"
+    "在保持OneFingerBox功能不变的前提下，优化代码逻辑, 减少重复"
 )
 
 AGENTS = {
