@@ -28,3 +28,10 @@ CLAUDE_BASE_CMD = [
     "--output-format=stream-json",
     "--verbose"
 ]
+
+# Codex CLI base command (flags added dynamically by runner)
+CODEX_BASE_CMD = [
+    "codex", "exec",
+    "--sandbox", "workspace-write",
+    "--json"
+]

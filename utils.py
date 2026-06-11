@@ -3,7 +3,7 @@ import sys
 import json
 import subprocess
 
-from config import CLAUDE_BASE_CMD
+from config import CLAUDE_BASE_CMD, CODEX_BASE_CMD
 
 
 def _extract_text_deep(data, seen=None):
@@ -253,6 +253,116 @@ def run_claude_task(work_dir, message, system_prompt=None, use_continue=False, a
             print(f"\n❌ Claude 执行异常退出，退出码: {process.returncode}")
         else:
             print(f"\n\n✨ Claude 任务段流式对接完毕。")
+
+        return "".join(full_response_text)
+    except Exception as e:
+        print(f"💥 脚本运行时发生异常: {e}")
+        return None
+
+
+def parse_and_print_codex_stream(json_line):
+    """Decode structured JSON from Codex --json output and print content."""
+    try:
+        data = json.loads(json_line.strip())
+        event_type = data.get("type", "")
+
+        if event_type == "text":
+            text = data.get("content", "")
+            if text:
+                sys.stdout.write(text)
+                sys.stdout.flush()
+                return text
+
+        if event_type == "tool_call":
+            tool_name = data.get("name", "unknown")
+            sys.stdout.write(f"\n🛠️  [工具调用] {tool_name}")
+            sys.stdout.flush()
+            return ""
+
+        if event_type == "thinking":
+            sys.stdout.write("\r🧠 [Codex 正在深度思考中...] ")
+            sys.stdout.flush()
+            return ""
+
+        if event_type == "done":
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+            return ""
+
+        if event_type == "error":
+            msg = data.get("message", "")
+            sys.stdout.write(f"\n❌ [错误] {msg}")
+            sys.stdout.flush()
+            return ""
+
+        # Generic fallback: extract any text from unrecognized structures
+        text = _extract_text_deep(data)
+        if text:
+            sys.stdout.write(text)
+            sys.stdout.flush()
+            return text
+
+    except json.JSONDecodeError:
+        if json_line.strip():
+            sys.stdout.write(json_line)
+            sys.stdout.flush()
+    return ""
+
+
+def run_codex_task(work_dir, message, system_prompt=None, use_continue=False, add_dirs=None):
+    """Execute Codex CLI task with optional resume (--continue equivalent)."""
+    cmd = CODEX_BASE_CMD.copy()
+
+    if use_continue:
+        cmd = ["codex", "exec", "resume", "--last"]
+        prompt = message
+    else:
+        if system_prompt:
+            prompt = f"[SYSTEM PROMPT]\n{system_prompt}\n[/SYSTEM PROMPT]\n\n[USER PROMPT]\n{message}"
+        else:
+            prompt = message
+
+    if add_dirs:
+        for d in add_dirs:
+            cmd.extend(["--add-dir", d])
+
+    cmd.extend(["-C", work_dir])
+
+    if not use_continue:
+        cmd.append(prompt)
+
+    print(f"\n[任务发送] 工作目录: {work_dir}")
+    print(f"[提示词]: {message[:100]}...")
+    print(f"[参数]: use_continue={use_continue}, has_system_prompt={system_prompt is not None}")
+    print("⏳ 正在初始化流式监听管道并等待首包响应...")
+
+    try:
+        process = subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding='utf-8',
+            bufsize=1
+        )
+
+        full_response_text = []
+
+        while True:
+            line = process.stdout.readline()
+            if not line and process.poll() is not None:
+                break
+            if line:
+                clean_text = parse_and_print_codex_stream(line)
+                if clean_text:
+                    full_response_text.append(clean_text)
+
+        process.wait()
+        if process.returncode != 0:
+            print(f"\n❌ Codex 执行异常退出，退出码: {process.returncode}")
+        else:
+            print(f"\n\n✨ Codex 任务段流式对接完毕。")
 
         return "".join(full_response_text)
     except Exception as e:
