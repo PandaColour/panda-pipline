@@ -1,9 +1,10 @@
 import os
 from abc import ABC, abstractmethod
 
-from config import SYSTEM_PROMPT_DIR
 from utils import run_claude_task, run_codex_task
-
+from config import (
+    SYSTEM_PROMPT_DIR
+)
 
 class AgentInterface(ABC):
     """Abstract base defining the contract for AI coding agent backends."""
