@@ -7,7 +7,10 @@ class Pipeline:
     """Multi-agent pipeline with feedback loops and human review gates."""
 
     def __init__(self, work_dir):
-        self.work_dir = work_dir
+        self.work_dir = os.path.abspath(work_dir)
+        self.user_requirements_file = os.path.join(self.work_dir, "user_requirements.md")
+        self.develop_report_file = os.path.join(self.work_dir, "develop_report.md")
+        self.test_report_file = os.path.join(self.work_dir, "test_report.md")
         self.agents = {}
 
     def _create_agent(self, name, prompt_file, work_dir):
@@ -35,35 +38,33 @@ class Pipeline:
 
         analyst.send_message(
             f"请根据以下初始想法进行深度需求分析，在当前目录下创建一个 "
-            f"user_requirements.md 文件，完整路径必须是 {self.work_dir}/user_requirements.md。"
+            f"{self.user_requirements_file},返回前确保文件创建成功"
             f"请详细列出功能模块和技术栈选型。"
             f"初始想法：{user_idea}"
         )
 
-        req_file = os.path.join(self.work_dir, "user_requirements.md")
-
         while True:
             review_response = reviewer.send_message(
-                f"请审查 {self.work_dir}/user_requirements.md 文件中的需求分析，"
+                f"请审查 {self.user_requirements_file} 文件中的需求分析，"
                 f"评估其完整性、一致性和可行性。如果满意，请在回复中明确包含「同意方案」。"
                 f"如果不满意，请提供具体的修改建议。"
             )
 
             if review_response and "同意方案" in review_response:
-                human_feedback = human_gate("1. 需求分析", req_file)
+                human_feedback = human_gate("1. 需求分析", self.user_requirements_file)
                 if human_feedback is None:
                     break
                 analyst.send_message(
                     f"用户审查后提出了修改意见，请根据以下意见调整并更新 "
-                    f"user_requirements.md。修改意见：{human_feedback}"
+                    f"{self.user_requirements_file}。修改意见：{human_feedback}"
                 )
             else:
                 analyst.send_message(
                     f"需求审查提出了以下修改意见，请根据意见调整并更新 "
-                    f"user_requirements.md。修改意见：{review_response}"
+                    f"{self.user_requirements_file}。修改意见：{review_response}"
                 )
 
-        with open(req_file, 'r', encoding='utf-8') as f:
+        with open(self.user_requirements_file, 'r', encoding='utf-8') as f:
             self.final_requirements = f.read()
 
     # ==================== Stage 2: Development ====================
@@ -79,23 +80,23 @@ class Pipeline:
 
         while True:
             developer.send_message(
-                f"请先阅读 {self.work_dir}/user_requirements.md 中的需求文档，"
+                f"请先阅读 {self.user_requirements_file} 中的需求文档，"
                 f"然后编写代码实现。"
-                f"开发完成后，输出 {self.work_dir}/develop_report.md。"
+                f"开发完成后，输出 {self.develop_report_file},返回前确保文件创建成功"
                 f"不要编写测试代码。\n\n项目需求：\n{self.final_requirements}"
             )
 
             tester.send_message(
-                f"请先阅读 {self.work_dir}/develop_report.md 了解变更范围，"
+                f"请先阅读 {self.develop_report_file} 了解变更范围，"
                 f"然后阅读 {self.work_dir} 下的源代码，"
                 f"在测试目录下编写单元测试并实际执行测试命令。"
-                f"输出 {self.work_dir}/test_report.md，如有 Bug 生成 {self.work_dir}/bug_report.md。"
+                f"输出 {self.test_report_file}，如有 Bug 生成 {self.work_dir}/bug_report.md。"
             )
 
             review_response = code_reviewer.send_message(
-                f"请先阅读 {self.work_dir}/user_requirements.md、"
-                f"{self.work_dir}/develop_report.md 和 "
-                f"{self.work_dir}/test_report.md，"
+                f"请先阅读 {self.user_requirements_file}、"
+                f"{self.develop_report_file} 和 "
+                f"{self.test_report_file}，"
                 f"然后审查 {self.work_dir} 下的代码和 {self.work_dir} 下的测试。"
                 f"如果所有检查通过，请在回复中明确包含「任务完成」。"
                 f"否则请提供具体的修改建议。"
