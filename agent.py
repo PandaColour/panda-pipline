@@ -1,7 +1,7 @@
 import os
 from abc import ABC, abstractmethod
 
-from utils import run_claude_task, run_codex_task
+from utils import run_claude_task, run_codex_task, run_cursor_task
 from config import (
     SYSTEM_PROMPT_DIR
 )
@@ -41,6 +41,19 @@ class CodexAgent(AgentInterface):
         )
 
 
+class CursorAgent(AgentInterface):
+    """Wraps the Cursor Agent CLI as the agent backend."""
+
+    def run(self, work_dir, message, system_prompt=None, use_continue=False, add_dirs=None):
+        return run_cursor_task(
+            work_dir=work_dir,
+            message=message,
+            system_prompt=system_prompt,
+            use_continue=use_continue,
+            add_dirs=add_dirs
+        )
+
+
 class Agent:
     """Multi-backend conversational agent. Delegates execution to a backend strategy
     (ClaudeAgent or CodexAgent) based on agent_type."""
@@ -48,6 +61,7 @@ class Agent:
     _STRATEGY_MAP = {
         "claude": ClaudeAgent,
         "codex": CodexAgent,
+        "cursor": CursorAgent,
     }
 
     def __init__(self, name, system_prompt_file, work_dir, add_dirs=None, agent_type="claude"):

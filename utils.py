@@ -3,7 +3,7 @@ import sys
 import json
 import subprocess
 
-from config import CLAUDE_BASE_CMD, CODEX_BASE_CMD
+from config import CLAUDE_BASE_CMD, CODEX_BASE_CMD, CURSOR_BASE_CMD
 
 
 def _extract_text_deep(data, seen=None):
@@ -363,6 +363,121 @@ def run_codex_task(work_dir, message, system_prompt=None, use_continue=False, ad
             print(f"\n❌ Codex 执行异常退出，退出码: {process.returncode}")
         else:
             print(f"\n\n✨ Codex 任务段流式对接完毕。")
+
+        return "".join(full_response_text)
+    except Exception as e:
+        print(f"💥 脚本运行时发生异常: {e}")
+        return None
+
+
+def parse_and_print_cursor_stream(json_line):
+    """Decode Cursor Agent stream-json output and print useful content."""
+    try:
+        data = json.loads(json_line.strip())
+        event_type = data.get("type", "")
+        subtype = data.get("subtype", "")
+
+        if event_type == "system":
+            if subtype == "init":
+                model = data.get("model")
+                if model:
+                    sys.stdout.write(f"\n🤖 [Cursor 模型] {model}")
+                    sys.stdout.flush()
+            return ""
+
+        if event_type == "assistant":
+            if "timestamp_ms" not in data or "model_call_id" in data:
+                return ""
+            text = _extract_text_deep(data.get("message", data))
+            if text:
+                sys.stdout.write(text)
+                sys.stdout.flush()
+                return text
+            return ""
+
+        if event_type == "tool_call":
+            if subtype == "started":
+                sys.stdout.write("\n🛠️  [Cursor 工具调用]")
+                sys.stdout.flush()
+            return ""
+
+        if event_type == "result":
+            text = _extract_text_deep(data)
+            if text:
+                sys.stdout.write(f"\n{text}")
+                sys.stdout.flush()
+                return text
+            return ""
+
+        if event_type == "error":
+            msg = data.get("message", "")
+            sys.stdout.write(f"\n❌ [Cursor 错误] {msg}")
+            sys.stdout.flush()
+            return ""
+
+        text = _extract_text_deep(data)
+        if text:
+            sys.stdout.write(text)
+            sys.stdout.flush()
+            return text
+
+    except json.JSONDecodeError:
+        if json_line.strip():
+            sys.stdout.write(json_line)
+            sys.stdout.flush()
+    return ""
+
+
+def run_cursor_task(work_dir, message, system_prompt=None, use_continue=False, add_dirs=None):
+    """Execute Cursor Agent CLI task in headless mode with optional --continue."""
+    cmd = CURSOR_BASE_CMD.copy()
+
+    if use_continue:
+        cmd.append("--continue")
+        prompt = message
+    else:
+        prompt = message
+        if add_dirs:
+            extra_dirs = "\n".join(f"- {d}" for d in add_dirs)
+            prompt = f"{prompt}\n\n[ADDITIONAL DIRECTORIES]\n{extra_dirs}\n[/ADDITIONAL DIRECTORIES]"
+        if system_prompt:
+            prompt = f"[SYSTEM PROMPT]\n{system_prompt}\n[/SYSTEM PROMPT]\n\n[USER PROMPT]\n{prompt}"
+
+    cmd.append(prompt)
+
+    print(f"\n[任务发送] 工作目录: {work_dir}")
+    print(f"[提示词]: {message[:100]}...")
+    print(f"[参数]: use_continue={use_continue}, has_system_prompt={system_prompt is not None}")
+    print("⏳ 正在初始化 Cursor Agent 流式监听管道并等待首包响应...")
+
+    try:
+        process = subprocess.Popen(
+            cmd,
+            cwd=work_dir,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding='utf-8',
+            bufsize=1
+        )
+
+        full_response_text = []
+
+        while True:
+            line = process.stdout.readline()
+            if not line and process.poll() is not None:
+                break
+            if line:
+                clean_text = parse_and_print_cursor_stream(line)
+                if clean_text:
+                    full_response_text.append(clean_text)
+
+        process.wait()
+        if process.returncode != 0:
+            print(f"\n❌ Cursor 执行异常退出，退出码: {process.returncode}")
+        else:
+            print(f"\n\n✨ Cursor 任务段流式对接完毕。")
 
         return "".join(full_response_text)
     except Exception as e:

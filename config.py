@@ -18,3 +18,12 @@ CODEX_BASE_CMD = [
     "--sandbox", "workspace-write",
     "--json"
 ]
+
+# Cursor Agent CLI base command (flags added dynamically by runner)
+CURSOR_BASE_CMD = [
+    "agent",
+    "-p",
+    "--force",
+    "--output-format", "stream-json",
+    "--stream-partial-output"
+]
