@@ -90,7 +90,7 @@ class Pipeline:
             os.mkdir(os.path.join(self.work_dir, "_code_reviewer"))
 
         developer = self._create_agent("代码开发", "code_developer.md",
-                                       os.path.join(self.work_dir, "_code_developer")
+                                       os.path.join(self.work_dir, "_code_developer"),
                                        [self.work_dir])
         tester = self._create_agent("代码单元测试", "code_tester.md",
                                     os.path.join(self.work_dir, "_code_tester"),
@@ -104,7 +104,7 @@ class Pipeline:
                 f"请先阅读 {self.user_requirements_file} 中的需求文档，"
                 f"然后编写代码实现。"
                 f"开发完成后，输出 {self.develop_report_file},返回前确保文件创建成功"
-                f"不要编写测试代码。\n\n项目需求：\n{self.final_requirements}"
+                f"不要编写测试代码。"
             )
 
             tester.send_message(
