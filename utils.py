@@ -326,7 +326,8 @@ def run_codex_task(work_dir, message, system_prompt=None, use_continue=False, ad
         for d in add_dirs:
             cmd.extend(["--add-dir", d])
 
-    cmd.extend(["-C", work_dir])
+    if not use_continue:
+        cmd.extend(["-C", work_dir])
 
     if not use_continue:
         cmd.append(prompt)
@@ -339,6 +340,7 @@ def run_codex_task(work_dir, message, system_prompt=None, use_continue=False, ad
     try:
         process = subprocess.Popen(
             cmd,
+            cwd=work_dir,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,

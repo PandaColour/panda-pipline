@@ -37,8 +37,7 @@ class Pipeline:
         user_idea = input("\n🎯 请输入项目的总体开发需求描述:\n> ")
 
         analyst.send_message(
-            f"请根据以下初始想法进行深度需求分析，在当前目录下创建一个 "
-            f"{self.user_requirements_file},返回前确保文件创建成功"
+            f"请根据以下初始想法进行深度需求分析，创建{self.user_requirements_file},返回前确保文件创建成功"
             f"请详细列出功能模块和技术栈选型。"
             f"初始想法：{user_idea}"
         )
