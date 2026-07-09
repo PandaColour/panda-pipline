@@ -311,26 +311,25 @@ def parse_and_print_codex_stream(json_line):
 
 def run_codex_task(work_dir, message, system_prompt=None, use_continue=False, add_dirs=None):
     """Execute Codex CLI task with optional resume (--continue equivalent)."""
-    cmd = CODEX_BASE_CMD.copy()
+    if system_prompt:
+        prompt = f"[SYSTEM PROMPT]\n{system_prompt}\n[/SYSTEM PROMPT]\n\n[USER PROMPT]\n{message}"
+    else:
+        prompt = message
 
     if use_continue:
         cmd = ["codex", "exec", "resume", "--last"]
-        prompt = message
     else:
-        if system_prompt:
-            prompt = f"[SYSTEM PROMPT]\n{system_prompt}\n[/SYSTEM PROMPT]\n\n[USER PROMPT]\n{message}"
-        else:
-            prompt = message
+        cmd = CODEX_BASE_CMD.copy()
 
     if add_dirs:
-        for d in add_dirs:
-            cmd.extend(["--add-dir", d])
+        if use_continue:
+            extra_dirs = "\n".join(f"- {d}" for d in add_dirs)
+            prompt = f"{prompt}\n\n[ADDITIONAL DIRECTORIES]\n{extra_dirs}\n[/ADDITIONAL DIRECTORIES]"
+        else:
+            for d in add_dirs:
+                cmd.extend(["--add-dir", d])
 
-    if not use_continue:
-        cmd.extend(["-C", work_dir])
-
-    if not use_continue:
-        cmd.append(prompt)
+    cmd.append(prompt)
 
     print(f"\n[任务发送] 工作目录: {work_dir}")
     print(f"[提示词]: {message[:100]}...")
@@ -370,7 +369,6 @@ def run_codex_task(work_dir, message, system_prompt=None, use_continue=False, ad
     except Exception as e:
         print(f"💥 脚本运行时发生异常: {e}")
         return None
-
 
 def parse_and_print_cursor_stream(json_line):
     """Decode Cursor Agent stream-json output and print useful content."""

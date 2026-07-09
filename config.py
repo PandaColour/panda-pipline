@@ -15,7 +15,8 @@ CLAUDE_BASE_CMD = [
 # Codex CLI base command (flags added dynamically by runner)
 CODEX_BASE_CMD = [
     "codex", "exec",
-    "--sandbox", "workspace-write",
+    "-c", "shell_environment_policy.inherit=all",
+    "--sandbox", "danger-full-access",
     "--json"
 ]
 

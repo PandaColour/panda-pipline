@@ -14,7 +14,7 @@ class Pipeline:
         self.agents = {}
 
     def _create_agent(self, name, prompt_file, work_dir):
-        agent = Agent(name, prompt_file, work_dir)
+        agent = Agent(name, prompt_file, work_dir, agent_type="codex")
         self.agents[name] = agent
         return agent
 
