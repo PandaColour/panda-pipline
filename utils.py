@@ -261,10 +261,84 @@ def run_claude_task(work_dir, message, system_prompt=None, use_continue=False, a
 
 
 def parse_and_print_codex_stream(json_line):
-    """Decode structured JSON from Codex --json output and print content."""
+    """Decode structured JSON from Codex --json output and print useful content."""
     try:
         data = json.loads(json_line.strip())
         event_type = data.get("type", "")
+
+        if event_type == "thread.started":
+            thread_id = data.get("thread_id", "")
+            if thread_id:
+                sys.stdout.write(f"\n🧵 [Codex 会话] {thread_id}\n")
+                sys.stdout.flush()
+            return ""
+
+        if event_type == "turn.started":
+            sys.stdout.write("\n--- [codex] ---\n")
+            sys.stdout.flush()
+            return ""
+
+        if event_type == "turn.completed":
+            usage = data.get("usage", {})
+            if usage:
+                sys.stdout.write(f"\n[用量: {usage}]")
+                sys.stdout.flush()
+            return ""
+
+        if event_type in {"item.started", "item.completed"}:
+            item = data.get("item", {})
+            item_type = item.get("type", "")
+
+            if item_type == "agent_message":
+                text = item.get("text", "")
+                if text:
+                    sys.stdout.write(text)
+                    sys.stdout.flush()
+                    return text
+                return ""
+
+            if item_type == "command_execution":
+                command = item.get("command", "")
+                status = item.get("status", "")
+                if event_type == "item.started":
+                    sys.stdout.write(f"\n🛠️  [Codex 执行命令] {command}")
+                else:
+                    exit_code = item.get("exit_code")
+                    output = item.get("aggregated_output", "")
+                    sys.stdout.write(f"\n✅ [Codex 命令完成] exit_code={exit_code}, status={status}")
+                    if output:
+                        preview = output.strip()
+                        if preview:
+                            sys.stdout.write(f"\n{preview}\n")
+                sys.stdout.flush()
+                return ""
+
+            if item_type in {"reasoning", "thinking"}:
+                sys.stdout.write("\r🧠 [Codex 正在思考中...] ")
+                sys.stdout.flush()
+                return ""
+
+            if item_type in {"tool_call", "function_call", "mcp_tool_call"}:
+                tool_name = item.get("name") or item.get("tool_name") or "unknown"
+                sys.stdout.write(f"\n🛠️  [Codex 工具调用] {tool_name}")
+                sys.stdout.flush()
+                return ""
+
+            text = item.get("text", "")
+            if isinstance(text, str) and text:
+                sys.stdout.write(text)
+                sys.stdout.flush()
+                return text
+            return ""
+
+        if event_type in {"agent_message", "agent_message_delta", "message"}:
+            text = data.get("text") or data.get("delta") or data.get("content") or ""
+            if isinstance(text, dict):
+                text = text.get("text") or text.get("content") or ""
+            if text:
+                sys.stdout.write(text)
+                sys.stdout.flush()
+                return text
 
         if event_type == "text":
             text = data.get("content", "")
@@ -369,6 +443,7 @@ def run_codex_task(work_dir, message, system_prompt=None, use_continue=False, ad
     except Exception as e:
         print(f"💥 脚本运行时发生异常: {e}")
         return None
+
 
 def parse_and_print_cursor_stream(json_line):
     """Decode Cursor Agent stream-json output and print useful content."""
