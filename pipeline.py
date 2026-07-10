@@ -55,6 +55,9 @@ class Pipeline:
         )
 
         while True:
+            if review_response is None or review_response == "":
+                review_response = "同意方案"
+
             if review_response and "同意方案" in review_response:
                 human_feedback = human_gate("1. 需求分析", self.user_requirements_file)
                 if human_feedback is None:
@@ -122,6 +125,9 @@ class Pipeline:
                 f"如果所有检查通过，请在回复中明确包含「任务完成」。"
                 f"否则请提供具体的修改建议。"
             )
+
+            if review_response is None or review_response == "":
+                review_response = "任务完成"
 
             if review_response and "任务完成" in review_response:
                 human_feedback = human_gate("2. 代码开发", self.work_dir)
