@@ -450,8 +450,31 @@ def run_codex_task(work_dir, message, system_prompt=None, use_continue=False, ad
         return None
 
 
-def parse_and_print_cursor_stream(json_line):
-    """Decode Cursor Agent stream-json output and print useful content."""
+def _extract_cursor_message_text(message):
+    """Extract assistant/user text blocks from a Cursor stream message."""
+    if not isinstance(message, dict):
+        return ""
+
+    parts = []
+    content = message.get("content")
+    if isinstance(content, list):
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                text = block.get("text")
+                if isinstance(text, str) and text:
+                    parts.append(text)
+    elif isinstance(content, str) and content:
+        parts.append(content)
+
+    return "".join(parts)
+
+
+def parse_and_print_cursor_stream(json_line, stream_state=None):
+    """Decode Cursor Agent stream-json output and print useful content.
+
+  stream_state is an optional dict used to deduplicate assistant chunks when
+  --stream-partial-output emits both deltas and a final summary message.
+    """
     try:
         data = json.loads(json_line.strip())
         event_type = data.get("type", "")
@@ -465,15 +488,35 @@ def parse_and_print_cursor_stream(json_line):
                     sys.stdout.flush()
             return ""
 
-        if event_type == "assistant":
-            if "timestamp_ms" not in data or "model_call_id" in data:
-                return ""
-            text = _extract_text_deep(data.get("message", data))
-            if text:
-                sys.stdout.write(text)
-                sys.stdout.flush()
-                return text
+        if event_type == "user":
             return ""
+
+        if event_type == "thinking":
+            if subtype == "delta":
+                sys.stdout.write("\r🧠 [Cursor 正在思考中...] ")
+                sys.stdout.flush()
+            return ""
+
+        if event_type == "assistant":
+            # model_call_id events repeat the already-streamed chunk before tool calls.
+            if "model_call_id" in data:
+                return ""
+
+            text = _extract_cursor_message_text(data.get("message", {}))
+            if not text:
+                return ""
+
+            is_stream_delta = "timestamp_ms" in data
+            if stream_state is not None:
+                if is_stream_delta:
+                    stream_state["saw_streaming_assistant"] = True
+                elif stream_state.get("saw_streaming_assistant"):
+                    # Final full message after partial deltas; skip duplicate.
+                    return ""
+
+            sys.stdout.write(text)
+            sys.stdout.flush()
+            return text
 
         if event_type == "tool_call":
             if subtype == "started":
@@ -482,24 +525,20 @@ def parse_and_print_cursor_stream(json_line):
             return ""
 
         if event_type == "result":
-            text = _extract_text_deep(data)
-            if text:
-                sys.stdout.write(f"\n{text}")
+            result = data.get("result")
+            if isinstance(result, str) and result:
+                if stream_state is not None:
+                    stream_state["result_text"] = result
+                sys.stdout.write(f"\n{result}")
                 sys.stdout.flush()
-                return text
+                return result
             return ""
 
         if event_type == "error":
             msg = data.get("message", "")
             sys.stdout.write(f"\n❌ [Cursor 错误] {msg}")
             sys.stdout.flush()
-            return ""
-
-        text = _extract_text_deep(data)
-        if text:
-            sys.stdout.write(text)
-            sys.stdout.flush()
-            return text
+            return msg if msg else ""
 
     except json.JSONDecodeError:
         if json_line.strip():
@@ -548,13 +587,14 @@ def run_cursor_task(work_dir, message, system_prompt=None, use_continue=False, a
         )
 
         full_response_text = []
+        stream_state = {"saw_streaming_assistant": False, "result_text": None}
 
         while True:
             line = process.stdout.readline()
             if not line and process.poll() is not None:
                 break
             if line:
-                clean_text = parse_and_print_cursor_stream(line)
+                clean_text = parse_and_print_cursor_stream(line, stream_state)
                 if clean_text:
                     full_response_text.append(clean_text)
 
@@ -564,6 +604,8 @@ def run_cursor_task(work_dir, message, system_prompt=None, use_continue=False, a
         else:
             print(f"\n\n✨ Cursor 任务段流式对接完毕。")
 
+        if stream_state.get("result_text"):
+            return stream_state["result_text"]
         return "".join(full_response_text)
     except Exception as e:
         print(f"💥 脚本运行时发生异常: {e}")

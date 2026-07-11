@@ -14,7 +14,7 @@ class Pipeline:
         self.agents = {}
 
     def _create_agent(self, name, prompt_file, work_dir, add_dirs: None):
-        agent = Agent(name, prompt_file, work_dir, add_dirs = add_dirs, agent_type="codex")
+        agent = Agent(name, prompt_file, work_dir, add_dirs = add_dirs, agent_type="cursor")
         self.agents[name] = agent
         return agent
 
@@ -58,7 +58,7 @@ class Pipeline:
             if review_response is None or review_response == "":
                 review_response = "同意方案"
 
-            if review_response and "同意方案" in review_response:
+            if review_response and "同意方案" in review_response[0:50]:
                 human_feedback = human_gate("1. 需求分析", self.user_requirements_file)
                 if human_feedback is None:
                     break
@@ -93,8 +93,8 @@ class Pipeline:
             os.mkdir(os.path.join(self.work_dir, "_code_reviewer"))
 
         developer = self._create_agent("代码开发", "code_developer.md",
-                                       os.path.join(self.work_dir, "_code_developer"),
-                                       [self.work_dir])
+                                       self.work_dir,
+                                       None)
         tester = self._create_agent("代码单元测试", "code_tester.md",
                                     os.path.join(self.work_dir, "_code_tester"),
                                     [self.work_dir])
@@ -129,7 +129,7 @@ class Pipeline:
             if review_response is None or review_response == "":
                 review_response = "任务完成"
 
-            if review_response and "任务完成" in review_response:
+            if review_response and "任务完成" in review_response[0:50]:
                 human_feedback = human_gate("2. 代码开发", self.work_dir)
                 if human_feedback is None:
                     break
