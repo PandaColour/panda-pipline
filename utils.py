@@ -3,7 +3,12 @@ import sys
 import json
 import subprocess
 
-from config import CLAUDE_BASE_CMD, CODEX_BASE_CMD, CURSOR_BASE_CMD
+from config import (
+    CLAUDE_BASE_CMD,
+    CODEX_BASE_CMD,
+    build_cursor_base_cmd,
+    subprocess_env,
+)
 
 
 def _extract_text_deep(data, seen=None):
@@ -505,7 +510,11 @@ def parse_and_print_cursor_stream(json_line):
 
 def run_cursor_task(work_dir, message, system_prompt=None, use_continue=False, add_dirs=None):
     """Execute Cursor Agent CLI task in headless mode with optional --continue."""
-    cmd = CURSOR_BASE_CMD.copy()
+    try:
+        cmd = build_cursor_base_cmd()
+    except FileNotFoundError as e:
+        print(f"💥 脚本运行时发生异常: {e}")
+        return None
 
     if use_continue:
         cmd.append("--continue")
@@ -529,6 +538,7 @@ def run_cursor_task(work_dir, message, system_prompt=None, use_continue=False, a
         process = subprocess.Popen(
             cmd,
             cwd=work_dir,
+            env=subprocess_env(),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
