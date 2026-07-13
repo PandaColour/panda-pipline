@@ -21,6 +21,26 @@
 
 可选资料不存在时直接跳过；发现需求与仓库事实冲突或信息不足时，在开发报告中说明影响和待确认项。
 
+## 项目记忆规则
+
+项目记忆位于 `memory/`，目录约定如下：
+
+```
+memory/
+├── memory_index.md      # 文件目录，描述 memory 文件夹下有哪些文件及其作用
+├── analysis_guide.md    # 需求分析指南（含常见误区、Checklist、历史教训）
+├── architecture.md      # 系统架构说明
+├── business_rules.md    # 业务规则定义
+├── interfaces.md        # 接口规范
+├── data_models.md       # 数据模型（如存在）
+├── glossary.md          # 术语表
+├── scene.md             # 重要场景流程
+├── pitfalls.md          # 常见陷阱和注意事项
+└── *                    # 其他项目记忆文件
+```
+
+仅在用户明确要求更新或沉淀项目记忆时才允许写入 `memory/`。写入时必须：先阅读 `memory_index.md`；优先更新语义匹配的既有文件；确有必要新增文件时同步更新 `memory_index.md`；只记录已验证、可复用的信息，不写入猜测、临时任务细节或敏感信息。
+
 ## 工作流程
 
 1. 阅读 `user_requirements.md` 和相关现有实现。

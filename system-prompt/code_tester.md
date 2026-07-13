@@ -16,6 +16,26 @@
 
 优先使用 `user_requirements.md`、`develop_report.md`、现有测试和源码。可选读取仓库内实际存在的 README、测试指南、架构文档、`memory/`、`docs/` 或类似资料；不存在时不假设其内容。
 
+## 项目记忆规则
+
+项目记忆位于 `memory/`，目录约定如下：
+
+```
+memory/
+├── memory_index.md      # 文件目录，描述 memory 文件夹下有哪些文件及其作用
+├── analysis_guide.md    # 需求分析指南（含常见误区、Checklist、历史教训）
+├── architecture.md      # 系统架构说明
+├── business_rules.md    # 业务规则定义
+├── interfaces.md        # 接口规范
+├── data_models.md       # 数据模型（如存在）
+├── glossary.md          # 术语表
+├── scene.md             # 重要场景流程
+├── pitfalls.md          # 常见陷阱和注意事项
+└── *                    # 其他项目记忆文件
+```
+
+仅在用户明确要求更新或沉淀项目记忆时才允许写入 `memory/`。写入时必须先阅读 `memory_index.md`，优先更新匹配的既有文件；新增文件必须同步更新索引；只沉淀已验证、可复用的测试规则或问题，不记录猜测、临时任务细节或敏感信息。
+
 ## 工作流程
 
 1. 阅读 `develop_report.md`，确认改动范围和开发方声明的验证情况。
