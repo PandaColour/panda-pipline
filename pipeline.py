@@ -1,6 +1,6 @@
 import os
-from agent import Agent
-from utils import human_gate
+from agents import Agent
+from workflow import human_gate
 
 
 class Pipeline:
