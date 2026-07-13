@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import subprocess
+from dataclasses import dataclass
 
 from config import (
     CLAUDE_BASE_CMD,
@@ -9,6 +10,14 @@ from config import (
     build_cursor_base_cmd,
     subprocess_env,
 )
+
+
+@dataclass(frozen=True)
+class AgentRunResult:
+    text: str
+    session_id: str | None
+    returncode: int
+    error: str | None = None
 
 
 def _extract_text_deep(data, seen=None):
@@ -60,11 +69,14 @@ def _extract_text_deep(data, seen=None):
     return "".join(text_parts)
 
 
-def parse_and_print_stream(json_line):
+def parse_and_print_stream(json_line, stream_state=None):
     """Decode structured JSON from Claude stream and print as much content as possible."""
     try:
         data = json.loads(json_line.strip())
         event_type = data.get("type", "")
+        session_id = data.get("session_id")
+        if stream_state is not None and isinstance(session_id, str) and session_id:
+            stream_state["session_id"] = session_id
 
         # ---- thinking ----
         if event_type == "thinking":
@@ -75,7 +87,7 @@ def parse_and_print_stream(json_line):
         # ---- stream_event wraps inner events ----
         if event_type == "stream_event":
             inner = data.get("event") or data.get("content_block") or {}
-            return parse_and_print_stream(json.dumps(inner))
+            return parse_and_print_stream(json.dumps(inner), stream_state)
 
         # ---- content_block_delta: the main streaming text source ----
         if event_type == "content_block_delta":
@@ -209,12 +221,12 @@ def parse_and_print_stream(json_line):
     return ""
 
 
-def run_claude_task(work_dir, message, system_prompt=None, use_continue=False, add_dirs=None):
-    """Execute Claude CLI task in work_dir with optional --continue, --append-system-prompt, and --add-dir."""
+def run_claude_task(work_dir, message, system_prompt=None, session_id=None, add_dirs=None):
+    """Execute a Claude CLI turn, optionally resuming an explicit session."""
     cmd = CLAUDE_BASE_CMD.copy()
 
-    if use_continue:
-        cmd.append("--continue")
+    if session_id:
+        cmd.extend(["--resume", session_id])
 
     if system_prompt:
         cmd.extend(["--append-system-prompt", system_prompt])
@@ -227,7 +239,7 @@ def run_claude_task(work_dir, message, system_prompt=None, use_continue=False, a
 
     print(f"\n[任务发送] 工作目录: {work_dir}")
     print(f"[提示词]: {message[:100]}...")
-    print(f"[参数]: use_continue={use_continue}, has_system_prompt={system_prompt is not None}")
+    print(f"[参数]: session_id={session_id}, has_system_prompt={system_prompt is not None}")
     print("⏳ 正在初始化流式监听管道并等待首包响应...")
 
     try:
@@ -243,29 +255,37 @@ def run_claude_task(work_dir, message, system_prompt=None, use_continue=False, a
         )
 
         full_response_text = []
+        stream_state = {"session_id": session_id}
 
         while True:
             line = process.stdout.readline()
             if not line and process.poll() is not None:
                 break
             if line:
-                clean_text = parse_and_print_stream(line)
+                clean_text = parse_and_print_stream(line, stream_state)
                 if clean_text:
                     full_response_text.append(clean_text)
 
         process.wait()
+        error = None
         if process.returncode != 0:
+            error = f"Claude exited with code {process.returncode}"
             print(f"\n❌ Claude 执行异常退出，退出码: {process.returncode}")
         else:
             print(f"\n\n✨ Claude 任务段流式对接完毕。")
 
-        return "".join(full_response_text)
+        return AgentRunResult(
+            text="".join(full_response_text),
+            session_id=stream_state.get("session_id"),
+            returncode=process.returncode,
+            error=error,
+        )
     except Exception as e:
         print(f"💥 脚本运行时发生异常: {e}")
-        return None
+        return AgentRunResult("", session_id, -1, str(e))
 
 
-def parse_and_print_codex_stream(json_line):
+def parse_and_print_codex_stream(json_line, stream_state=None):
     """Decode structured JSON from Codex --json output and print useful content."""
     try:
         data = json.loads(json_line.strip())
@@ -274,6 +294,8 @@ def parse_and_print_codex_stream(json_line):
         if event_type == "thread.started":
             thread_id = data.get("thread_id", "")
             if thread_id:
+                if stream_state is not None:
+                    stream_state["session_id"] = thread_id
                 sys.stdout.write(f"\n🧵 [Codex 会话] {thread_id}\n")
                 sys.stdout.flush()
             return ""
@@ -388,20 +410,20 @@ def parse_and_print_codex_stream(json_line):
     return ""
 
 
-def run_codex_task(work_dir, message, system_prompt=None, use_continue=False, add_dirs=None):
-    """Execute Codex CLI task with optional resume (--continue equivalent)."""
-    if system_prompt:
-        prompt = f"[SYSTEM PROMPT]\n{system_prompt}\n[/SYSTEM PROMPT]\n\n[USER PROMPT]\n{message}"
-    else:
+def run_codex_task(work_dir, message, system_prompt=None, session_id=None, add_dirs=None):
+    """Execute a Codex CLI turn, optionally resuming an explicit thread."""
+    if session_id:
         prompt = message
-
-    if use_continue:
-        cmd = ["codex", "exec", "resume", "--last"]
+        cmd = ["codex", "exec", "resume", "--json", session_id]
     else:
+        if system_prompt:
+            prompt = f"[SYSTEM PROMPT]\n{system_prompt}\n[/SYSTEM PROMPT]\n\n[USER PROMPT]\n{message}"
+        else:
+            prompt = message
         cmd = CODEX_BASE_CMD.copy()
 
     if add_dirs:
-        if use_continue:
+        if session_id:
             extra_dirs = "\n".join(f"- {d}" for d in add_dirs)
             prompt = f"{prompt}\n\n[ADDITIONAL DIRECTORIES]\n{extra_dirs}\n[/ADDITIONAL DIRECTORIES]"
         else:
@@ -412,7 +434,7 @@ def run_codex_task(work_dir, message, system_prompt=None, use_continue=False, ad
 
     print(f"\n[任务发送] 工作目录: {work_dir}")
     print(f"[提示词]: {message[:100]}...")
-    print(f"[参数]: use_continue={use_continue}, has_system_prompt={system_prompt is not None}")
+    print(f"[参数]: session_id={session_id}, has_system_prompt={system_prompt is not None}")
     print("⏳ 正在初始化流式监听管道并等待首包响应...")
 
     try:
@@ -428,26 +450,34 @@ def run_codex_task(work_dir, message, system_prompt=None, use_continue=False, ad
         )
 
         full_response_text = []
+        stream_state = {"session_id": session_id}
 
         while True:
             line = process.stdout.readline()
             if not line and process.poll() is not None:
                 break
             if line:
-                clean_text = parse_and_print_codex_stream(line)
+                clean_text = parse_and_print_codex_stream(line, stream_state)
                 if clean_text:
                     full_response_text.append(clean_text)
 
         process.wait()
+        error = None
         if process.returncode != 0:
+            error = f"Codex exited with code {process.returncode}"
             print(f"\n❌ Codex 执行异常退出，退出码: {process.returncode}")
         else:
             print(f"\n\n✨ Codex 任务段流式对接完毕。")
 
-        return "".join(full_response_text)
+        return AgentRunResult(
+            text="".join(full_response_text),
+            session_id=stream_state.get("session_id"),
+            returncode=process.returncode,
+            error=error,
+        )
     except Exception as e:
         print(f"💥 脚本运行时发生异常: {e}")
-        return None
+        return AgentRunResult("", session_id, -1, str(e))
 
 
 def _extract_cursor_message_text(message):
@@ -479,6 +509,9 @@ def parse_and_print_cursor_stream(json_line, stream_state=None):
         data = json.loads(json_line.strip())
         event_type = data.get("type", "")
         subtype = data.get("subtype", "")
+        session_id = data.get("session_id")
+        if stream_state is not None and isinstance(session_id, str) and session_id:
+            stream_state["session_id"] = session_id
 
         if event_type == "system":
             if subtype == "init":
@@ -547,16 +580,16 @@ def parse_and_print_cursor_stream(json_line, stream_state=None):
     return ""
 
 
-def run_cursor_task(work_dir, message, system_prompt=None, use_continue=False, add_dirs=None):
-    """Execute Cursor Agent CLI task in headless mode with optional --continue."""
+def run_cursor_task(work_dir, message, system_prompt=None, session_id=None, add_dirs=None):
+    """Execute a Cursor Agent CLI turn, optionally resuming an explicit chat."""
     try:
         cmd = build_cursor_base_cmd()
     except FileNotFoundError as e:
         print(f"💥 脚本运行时发生异常: {e}")
-        return None
+        return AgentRunResult("", session_id, -1, str(e))
 
-    if use_continue:
-        cmd.append("--continue")
+    if session_id:
+        cmd.extend(["--resume", session_id])
         prompt = message
     else:
         prompt = message
@@ -570,7 +603,7 @@ def run_cursor_task(work_dir, message, system_prompt=None, use_continue=False, a
 
     print(f"\n[任务发送] 工作目录: {work_dir}")
     print(f"[提示词]: {message[:100]}...")
-    print(f"[参数]: use_continue={use_continue}, has_system_prompt={system_prompt is not None}")
+    print(f"[参数]: session_id={session_id}, has_system_prompt={system_prompt is not None}")
     print("⏳ 正在初始化 Cursor Agent 流式监听管道并等待首包响应...")
 
     try:
@@ -587,7 +620,11 @@ def run_cursor_task(work_dir, message, system_prompt=None, use_continue=False, a
         )
 
         full_response_text = []
-        stream_state = {"saw_streaming_assistant": False, "result_text": None}
+        stream_state = {
+            "saw_streaming_assistant": False,
+            "result_text": None,
+            "session_id": session_id,
+        }
 
         while True:
             line = process.stdout.readline()
@@ -599,17 +636,23 @@ def run_cursor_task(work_dir, message, system_prompt=None, use_continue=False, a
                     full_response_text.append(clean_text)
 
         process.wait()
+        error = None
         if process.returncode != 0:
+            error = f"Cursor exited with code {process.returncode}"
             print(f"\n❌ Cursor 执行异常退出，退出码: {process.returncode}")
         else:
             print(f"\n\n✨ Cursor 任务段流式对接完毕。")
 
-        if stream_state.get("result_text"):
-            return stream_state["result_text"]
-        return "".join(full_response_text)
+        text = stream_state.get("result_text") or "".join(full_response_text)
+        return AgentRunResult(
+            text=text,
+            session_id=stream_state.get("session_id"),
+            returncode=process.returncode,
+            error=error,
+        )
     except Exception as e:
         print(f"💥 脚本运行时发生异常: {e}")
-        return None
+        return AgentRunResult("", session_id, -1, str(e))
 
 
 def human_gate(stage_name, review_file_path=None):

@@ -13,8 +13,14 @@ class Pipeline:
         self.test_report_file = os.path.join(self.work_dir, "test_report.md")
         self.agents = {}
 
-    def _create_agent(self, name, prompt_file, work_dir, add_dirs: None):
-        agent = Agent(name, prompt_file, work_dir, add_dirs = add_dirs, agent_type="cursor")
+    def _create_agent(self, name, prompt_file):
+        agent = Agent(
+            name,
+            prompt_file,
+            self.work_dir,
+            add_dirs=None,
+            agent_type="cursor",
+        )
         self.agents[name] = agent
         return agent
 
@@ -31,14 +37,8 @@ class Pipeline:
         print("📋 阶段 1: 需求分析")
         print("=" * 60)
 
-        analyst = self._create_agent("需求分析", "requirements_analyst.md",
-                                     self.work_dir,
-                                     None)
-        if not os.path.exists(os.path.join(self.work_dir, "_reviewer")):
-            os.mkdir(os.path.join(self.work_dir, "_reviewer"))
-        reviewer = self._create_agent("需求审查", "requirements_reviewer.md",
-                                      os.path.join(self.work_dir, "_reviewer"),
-                                      [self.work_dir])
+        analyst = self._create_agent("需求分析", "requirements_analyst.md")
+        reviewer = self._create_agent("需求审查", "requirements_reviewer.md")
 
         user_idea = input("\n🎯 请输入项目的总体开发需求描述:\n> ")
 
@@ -85,22 +85,9 @@ class Pipeline:
         print("💻 阶段 2: 代码开发")
         print("=" * 60)
 
-        if not os.path.exists(os.path.join(self.work_dir, "_code_developer")):
-            os.mkdir(os.path.join(self.work_dir, "_code_developer"))
-        if not os.path.exists(os.path.join(self.work_dir, "_code_tester")):
-            os.mkdir(os.path.join(self.work_dir, "_code_tester"))
-        if not os.path.exists(os.path.join(self.work_dir, "_code_reviewer")):
-            os.mkdir(os.path.join(self.work_dir, "_code_reviewer"))
-
-        developer = self._create_agent("代码开发", "code_developer.md",
-                                       self.work_dir,
-                                       None)
-        tester = self._create_agent("代码单元测试", "code_tester.md",
-                                    os.path.join(self.work_dir, "_code_tester"),
-                                    [self.work_dir])
-        code_reviewer = self._create_agent("代码review", "code_reviewer.md",
-                                           os.path.join(self.work_dir, "_code_reviewer"),
-                                           [self.work_dir])
+        developer = self._create_agent("代码开发", "code_developer.md")
+        tester = self._create_agent("代码单元测试", "code_tester.md")
+        code_reviewer = self._create_agent("代码review", "code_reviewer.md")
 
         while True:
             developer.send_message(

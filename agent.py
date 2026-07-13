@@ -10,20 +10,20 @@ class AgentInterface(ABC):
     """Abstract base defining the contract for AI coding agent backends."""
 
     @abstractmethod
-    def run(self, work_dir, message, system_prompt=None, use_continue=False, add_dirs=None):
-        """Execute the agent task and return the full response text."""
+    def run(self, work_dir, message, system_prompt=None, session_id=None, add_dirs=None):
+        """Execute one provider turn and return its structured result."""
         pass
 
 
 class ClaudeAgent(AgentInterface):
     """Wraps the Claude CLI as the agent backend."""
 
-    def run(self, work_dir, message, system_prompt=None, use_continue=False, add_dirs=None):
+    def run(self, work_dir, message, system_prompt=None, session_id=None, add_dirs=None):
         return run_claude_task(
             work_dir=work_dir,
             message=message,
             system_prompt=system_prompt,
-            use_continue=use_continue,
+            session_id=session_id,
             add_dirs=add_dirs
         )
 
@@ -31,12 +31,12 @@ class ClaudeAgent(AgentInterface):
 class CodexAgent(AgentInterface):
     """Wraps the Codex CLI as the agent backend."""
 
-    def run(self, work_dir, message, system_prompt=None, use_continue=False, add_dirs=None):
+    def run(self, work_dir, message, system_prompt=None, session_id=None, add_dirs=None):
         return run_codex_task(
             work_dir=work_dir,
             message=message,
             system_prompt=system_prompt,
-            use_continue=use_continue,
+            session_id=session_id,
             add_dirs=add_dirs
         )
 
@@ -44,12 +44,12 @@ class CodexAgent(AgentInterface):
 class CursorAgent(AgentInterface):
     """Wraps the Cursor Agent CLI as the agent backend."""
 
-    def run(self, work_dir, message, system_prompt=None, use_continue=False, add_dirs=None):
+    def run(self, work_dir, message, system_prompt=None, session_id=None, add_dirs=None):
         return run_cursor_task(
             work_dir=work_dir,
             message=message,
             system_prompt=system_prompt,
-            use_continue=use_continue,
+            session_id=session_id,
             add_dirs=add_dirs
         )
 
@@ -69,6 +69,8 @@ class Agent:
         self.work_dir = work_dir
         self.add_dirs = add_dirs or []
         self.call_count = 0
+        self.session_id = None
+        self.last_run_result = None
         self.system_prompt = self._load_system_prompt(system_prompt_file)
         self.agent_type = agent_type
         self.agent_impl = self._create_strategy(agent_type)
@@ -97,19 +99,24 @@ class Agent:
             return ""
 
     def send_message(self, message):
-        """Send a message to this agent. First call is fresh (no --continue),
-        subsequent calls include --continue to maintain conversation context."""
-        use_continue = self.call_count > 0
+        """Send a message, resuming this Agent's explicit provider session."""
         self.call_count += 1
 
         print(f"\n{'=' * 60}")
         print(f"🤖 Agent [{self.name}] — 第 {self.call_count} 次调用 (backend: {self.agent_type})")
         print(f"{'=' * 60}")
 
-        return self.agent_impl.run(
+        result = self.agent_impl.run(
             work_dir=self.work_dir,
             message=message,
             system_prompt=self.system_prompt,
-            use_continue=use_continue,
+            session_id=self.session_id,
             add_dirs=self.add_dirs
         )
+        self.last_run_result = result
+        if self.session_id is None and result.session_id:
+            self.session_id = result.session_id
+        if result.returncode != 0:
+            detail = result.error or f"process exited with code {result.returncode}"
+            raise RuntimeError(f"Agent [{self.name}] execution failed: {detail}")
+        return result.text
