@@ -81,13 +81,15 @@ class CodexAgent:
                 prompt = f"[SYSTEM PROMPT]\n{system_prompt}\n[/SYSTEM PROMPT]\n\n[USER PROMPT]\n{message}"
             for directory in add_dirs or []:
                 cmd.extend(["--add-dir", directory])
-        cmd.append(prompt)
+        cmd.append("-")
 
         try:
             process = subprocess.Popen(
-                cmd, cwd=work_dir, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                cmd, cwd=work_dir, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT, text=True, encoding="utf-8", bufsize=1,
             )
+            process.stdin.write(prompt)
+            process.stdin.close()
             text_parts = []
             stream_state = {"session_id": session_id}
             while True:

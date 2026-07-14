@@ -94,13 +94,15 @@ class ClaudeAgent:
             cmd.extend(["--append-system-prompt", system_prompt])
         for directory in add_dirs or []:
             cmd.extend(["--add-dir", directory])
-        cmd.extend(["-p", message])
+        cmd.append("-p")
 
         try:
             process = subprocess.Popen(
-                cmd, cwd=work_dir, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                cmd, cwd=work_dir, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT, text=True, encoding="utf-8", bufsize=1,
             )
+            process.stdin.write(message)
+            process.stdin.close()
             text_parts = []
             stream_state = {"session_id": session_id}
             while True:
