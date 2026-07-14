@@ -3,10 +3,11 @@ import subprocess
 import sys
 
 from ._result import AgentRunResult
+from ._cli import executable_name
 
 
 CLAUDE_BASE_CMD = [
-    "claude",
+    executable_name("claude"),
     "--permission-mode", "bypassPermissions",
     "--output-format=stream-json",
     "--verbose",

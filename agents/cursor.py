@@ -5,10 +5,11 @@ import subprocess
 import sys
 
 from ._result import AgentRunResult
+from ._cli import executable_name
 
 
 CURSOR_BASE_CMD = [
-    "agent", "-p", "--force", "--output-format", "stream-json", "--stream-partial-output",
+    executable_name("agent"), "-p", "--force", "--output-format", "stream-json", "--stream-partial-output",
 ]
 _CLI_SEARCH_DIRS = [os.path.expanduser("~/.local/bin"), "/usr/local/bin", "/opt/homebrew/bin"]
 
@@ -25,9 +26,11 @@ def build_cursor_base_cmd():
         if not (os.path.isfile(binary) and os.access(binary, os.X_OK)):
             raise FileNotFoundError(f"CURSOR_AGENT_BIN is not executable: {binary}")
     else:
-        binary = shutil.which("agent", path=_extended_path())
+        binary = shutil.which(executable_name("agent"), path=_extended_path())
         if not binary:
-            raise FileNotFoundError("Cannot find 'agent' CLI. Install it or set CURSOR_AGENT_BIN.")
+            raise FileNotFoundError(
+                f"Cannot find '{executable_name('agent')}' CLI. Install it or set CURSOR_AGENT_BIN."
+            )
     cmd = CURSOR_BASE_CMD.copy()
     cmd[0] = binary
     return cmd

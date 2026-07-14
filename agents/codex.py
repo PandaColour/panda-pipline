@@ -3,10 +3,11 @@ import subprocess
 import sys
 
 from ._result import AgentRunResult
+from ._cli import executable_name
 
 
 CODEX_BASE_CMD = [
-    "codex", "exec",
+    executable_name("codex"), "exec",
     "-c", "shell_environment_policy.inherit=all",
     "--sandbox", "danger-full-access",
     "--json",
@@ -68,7 +69,7 @@ def parse_stream(json_line, stream_state):
 class CodexAgent:
     def run(self, work_dir, message, system_prompt=None, session_id=None, add_dirs=None):
         if session_id:
-            cmd = ["codex", "exec", "resume", "--json", session_id]
+            cmd = [executable_name("codex"), "exec", "resume", "--json", session_id]
             prompt = message
             if add_dirs:
                 directories = "\n".join(f"- {directory}" for directory in add_dirs)
