@@ -33,7 +33,6 @@ class BreakPipeline:
         self.requirements_dir = os.path.join(self.work_dir, "requirements")
         self.requirements_index_file = os.path.join(self.requirements_dir, "index.md")
         self.breakdown_approval_file = os.path.join(self.requirements_dir, ".breakdown-approved")
-        self.reports_dir = os.path.join(self.requirements_dir, "reports")
         self.prompt_dir = BREAK_SYSTEM_PROMPT_DIR
         self.agents = {}
         self._pending_human_feedback = {}
@@ -89,7 +88,6 @@ class BreakPipeline:
         print("\n" + "=" * 60 + "\n💻 阶段 2: 按小需求实施\n" + "=" * 60)
         items = self._load_items()
         self._validate_items(items)
-        os.makedirs(self.reports_dir, exist_ok=True)
         requirements_analyst = self._create_agent("小需求需求分析", "item_requirements_analyst.md")
         requirements_reviewer = self._create_agent("小需求需求评审", "item_requirements_reviewer.md")
         developer = self._create_agent("小需求开发", "item_developer.md")
@@ -120,9 +118,11 @@ class BreakPipeline:
             raise RuntimeError("没有可执行的小需求；请检查 requirements/index.md 中的阻塞状态和依赖。")
 
     def _run_item_requirements(self, item, analyst, reviewer):
-        requirement_file = os.path.join(self.requirements_dir, item.filename)
-        analysis_report = os.path.join(self.reports_dir, f"{item.requirement_id}-requirements-analysis.md")
-        review_report = os.path.join(self.reports_dir, f"{item.requirement_id}-requirements-review.md")
+        paths = self._item_paths(item)
+        os.makedirs(paths["workspace"], exist_ok=True)
+        requirement_file = paths["requirements"]
+        analysis_report = paths["requirements_analysis"]
+        review_report = paths["requirements_review"]
         self._set_status(item.requirement_id, "待需求评审")
         analysis_message = (
             f"只分析当前需求 {item.requirement_id}。阅读并完善 {requirement_file}，补全范围、影响、边界、异常、验收标准、依赖和风险；写 {analysis_report}。不得修改其他需求。"
@@ -152,14 +152,16 @@ class BreakPipeline:
             self._set_status(item.requirement_id, "待需求评审")
 
     def _resume_requirements_human_gate(self, item):
-        feedback = human_gate(f"2. 小需求 {item.requirement_id} 需求分析", os.path.join(self.requirements_dir, item.filename))
+        feedback = human_gate(f"2. 小需求 {item.requirement_id} 需求分析", self._item_paths(item)["requirements"])
         self._set_status(item.requirement_id, "待实施" if feedback is None else "需求返工中")
 
     def _run_item(self, item, developer, tester, reviewer):
-        requirement_file = os.path.join(self.requirements_dir, item.filename)
-        develop_report = os.path.join(self.reports_dir, f"{item.requirement_id}-develop.md")
-        test_report = os.path.join(self.reports_dir, f"{item.requirement_id}-test.md")
-        review_report = os.path.join(self.reports_dir, f"{item.requirement_id}-review.md")
+        paths = self._item_paths(item)
+        os.makedirs(paths["workspace"], exist_ok=True)
+        requirement_file = paths["requirements"]
+        develop_report = paths["develop"]
+        test_report = paths["test"]
+        review_report = paths["code_review"]
         self._set_status(item.requirement_id, "开发中")
         initial_message = (
             f"只实现当前需求 {item.requirement_id}。阅读 {requirement_file}，完成后写 {develop_report}。"
@@ -200,7 +202,7 @@ class BreakPipeline:
             developer.send_message(f"当前需求 {item.requirement_id} 的人工审核意见：{feedback}\n请仅修正当前项。")
 
     def _resume_human_gate(self, item):
-        requirement_file = os.path.join(self.requirements_dir, item.filename)
+        requirement_file = self._item_paths(item)["requirements"]
         feedback = human_gate(f"2. 小需求 {item.requirement_id}", requirement_file)
         if feedback is None:
             self._set_status(item.requirement_id, "已完成")
@@ -215,6 +217,20 @@ class BreakPipeline:
     @staticmethod
     def _is_requirement_change(feedback):
         return isinstance(feedback, str) and feedback.strip().startswith("需求变更:")
+
+    def _item_paths(self, item):
+        requirements_file = os.path.abspath(os.path.join(self.requirements_dir, item.filename))
+        workspace = os.path.dirname(requirements_file)
+        return {
+            "workspace": workspace,
+            "requirements": requirements_file,
+            "requirements_analysis": requirements_file,
+            "requirements_review": os.path.join(workspace, "requirement_review.md"),
+            "develop": os.path.join(workspace, "develop_report.md"),
+            "test": os.path.join(workspace, "test_report.md"),
+            "code_review": os.path.join(workspace, "code_review.md"),
+            "bug": os.path.join(workspace, "bug_report.md"),
+        }
 
     def _load_items(self):
         try:
@@ -272,6 +288,8 @@ class BreakPipeline:
             requirement_path = os.path.abspath(os.path.join(self.requirements_dir, item.filename))
             if os.path.commonpath([self.requirements_dir, requirement_path]) != self.requirements_dir:
                 raise ValueError("需求文件必须位于 requirements 目录。")
+            if os.path.basename(item.filename) != "user_requirements.md" or os.path.dirname(item.filename) in {"", "."}:
+                raise ValueError("需求文件必须是独立小需求目录中的 user_requirements.md。")
             if item.filename in filenames:
                 raise ValueError(f"重复需求文件: {item.filename}")
             filenames.add(item.filename)

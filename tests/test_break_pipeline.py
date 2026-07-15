@@ -1,3 +1,4 @@
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -5,9 +6,23 @@ from unittest.mock import MagicMock, patch
 
 from agents import Agent
 from break_pipeline import BreakPipeline
+from break_pipeline import RequirementItem
 
 
 class BreakPipelineTests(unittest.TestCase):
+    def test_item_artifacts_stay_in_its_own_workspace(self):
+        pipeline = BreakPipeline("workspace")
+        item = RequirementItem(
+            1, "R-001", "login", "待实施", [],
+            "R-001-login/user_requirements.md", "ok",
+        )
+
+        paths = pipeline._item_paths(item)
+
+        self.assertEqual(paths["requirements"], os.path.join(pipeline.requirements_dir, "R-001-login", "user_requirements.md"))
+        self.assertEqual(paths["develop"], os.path.join(pipeline.requirements_dir, "R-001-login", "develop_report.md"))
+        self.assertEqual(paths["test"], os.path.join(pipeline.requirements_dir, "R-001-login", "test_report.md"))
+        self.assertEqual(paths["code_review"], os.path.join(pipeline.requirements_dir, "R-001-login", "code_review.md"))
     def test_agent_loads_prompt_from_explicit_prompt_directory(self):
         with tempfile.TemporaryDirectory() as directory:
             prompt_dir = Path(directory)
@@ -117,15 +132,17 @@ class BreakPipelineTests(unittest.TestCase):
     def test_execution_creates_reports_directory(self):
         with tempfile.TemporaryDirectory() as work_dir:
             pipeline = BreakPipeline(work_dir)
-            self._write_requirement_files(work_dir, "R-001")
-            self._write_index(work_dir, [(1, "R-001", "待实施", "无", "001-first.md")])
+            workspace = Path(work_dir) / "requirements" / "R-001-first"
+            workspace.mkdir(parents=True)
+            (workspace / "user_requirements.md").write_text("# R-001\n", encoding="utf-8")
+            self._write_index(work_dir, [(1, "R-001", "待实施", "无", "R-001-first/user_requirements.md")])
             developer, tester, reviewer = MagicMock(), MagicMock(), MagicMock()
             reviewer.send_message.return_value = "任务完成"
             with patch.object(pipeline, "_create_agent", side_effect=[MagicMock(), MagicMock(), developer, tester, reviewer]), \
                     patch("break_pipeline.human_gate", return_value=None):
                 pipeline._run_execution()
 
-            self.assertTrue(Path(pipeline.reports_dir).is_dir())
+            self.assertTrue(workspace.is_dir())
 
     def test_run_resumes_only_human_approved_breakdown(self):
         with tempfile.TemporaryDirectory() as work_dir:
@@ -157,15 +174,17 @@ class BreakPipelineTests(unittest.TestCase):
     def test_reviewer_receives_review_report_path(self):
         with tempfile.TemporaryDirectory() as work_dir:
             pipeline = BreakPipeline(work_dir)
-            self._write_requirement_files(work_dir, "R-001")
-            self._write_index(work_dir, [(1, "R-001", "待实施", "无", "001-first.md")])
+            workspace = Path(work_dir) / "requirements" / "R-001-first"
+            workspace.mkdir(parents=True)
+            (workspace / "user_requirements.md").write_text("# R-001\n", encoding="utf-8")
+            self._write_index(work_dir, [(1, "R-001", "待实施", "无", "R-001-first/user_requirements.md")])
             developer, tester, reviewer = MagicMock(), MagicMock(), MagicMock()
             reviewer.send_message.return_value = "任务完成"
             with patch.object(pipeline, "_create_agent", side_effect=[MagicMock(), MagicMock(), developer, tester, reviewer]), \
                     patch("break_pipeline.human_gate", return_value=None):
                 pipeline._run_execution()
 
-            self.assertIn("R-001-review.md", reviewer.send_message.call_args.args[0])
+            self.assertIn(str(workspace / "code_review.md"), reviewer.send_message.call_args.args[0])
 
     def test_waiting_human_item_resumes_at_human_gate(self):
         with tempfile.TemporaryDirectory() as work_dir:
@@ -263,7 +282,9 @@ class BreakPipelineTests(unittest.TestCase):
         folder = Path(work_dir) / "requirements"
         folder.mkdir()
         for number, requirement_id in enumerate(ids, 1):
-            (folder / f"{number:03d}-{'first' if number == 1 else 'second'}.md").write_text(
+            workspace = folder / f"R-{number:03d}-{'first' if number == 1 else 'second'}"
+            workspace.mkdir()
+            (workspace / "user_requirements.md").write_text(
                 f"# {requirement_id}\n", encoding="utf-8"
             )
 
@@ -274,6 +295,8 @@ class BreakPipelineTests(unittest.TestCase):
             "| --- | --- | --- | --- | --- | --- | --- |",
         ]
         for order, requirement_id, status, dependencies, filename in rows:
+            if filename in {"001-first.md", "002-second.md"}:
+                filename = f"R-{order:03d}-{'first' if order == 1 else 'second'}/user_requirements.md"
             lines.append(
                 f"| {order} | {requirement_id} | name | {status} | {dependencies} | {filename} | ok |"
             )
