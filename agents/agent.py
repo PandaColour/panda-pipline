@@ -16,13 +16,22 @@ class Agent:
         "cursor": CursorAgent,
     }
 
-    def __init__(self, name, system_prompt_file, work_dir, add_dirs=None, agent_type="claude"):
+    def __init__(
+        self,
+        name,
+        system_prompt_file,
+        work_dir,
+        add_dirs=None,
+        agent_type="claude",
+        prompt_dir=None,
+    ):
         self.name = name
         self.work_dir = work_dir
         self.add_dirs = add_dirs or []
         self.call_count = 0
         self.session_id = None
         self.last_run_result = None
+        self.prompt_dir = prompt_dir or SYSTEM_PROMPT_DIR
         self.system_prompt = self._load_system_prompt(system_prompt_file)
         self.agent_type = agent_type
         self.agent_impl = self._create_strategy(agent_type)
@@ -42,7 +51,7 @@ class Agent:
         return strategy_cls()
 
     def _load_system_prompt(self, filename):
-        filepath = os.path.join(SYSTEM_PROMPT_DIR, filename)
+        filepath = os.path.join(self.prompt_dir, filename)
         try:
             with open(filepath, "r", encoding="utf-8") as prompt_file:
                 return prompt_file.read()

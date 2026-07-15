@@ -21,5 +21,11 @@ pip install -r requirements.txt
 python main.py
 ```
 
+将大需求拆分为可独立实现、验证和人工确认的小需求，并按依赖顺序实施：
+
+```bash
+python break_main.py
+```
+
 流水线启动后会自动初始化工作目录并克隆仓库。所有角色在同一个工程根目录中运行，
 每个 Agent 通过各自的 CLI 会话 ID 保持独立对话上下文。
