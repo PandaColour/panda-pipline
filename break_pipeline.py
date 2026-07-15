@@ -10,7 +10,8 @@ from workflow import human_gate
 BREAK_SYSTEM_PROMPT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "break-system-prompt")
 BREAKDOWN_APPROVAL = "拆分方案通过"
 ITEM_APPROVAL = "任务完成"
-VALID_STATUSES = {"待审核", "待实施", "开发中", "待人工确认", "已完成", "返工中", "阻塞"}
+REQUIREMENTS_APPROVAL = "同意方案"
+VALID_STATUSES = {"待审核", "待需求分析", "待需求评审", "需求返工中", "待需求人工确认", "待实施", "开发中", "待人工确认", "已完成", "返工中", "阻塞"}
 
 
 @dataclass
@@ -36,6 +37,7 @@ class BreakPipeline:
         self.prompt_dir = BREAK_SYSTEM_PROMPT_DIR
         self.agents = {}
         self._pending_human_feedback = {}
+        self._pending_requirement_feedback = {}
 
     def _create_agent(self, name, prompt_file):
         agent = Agent(name, prompt_file, self.work_dir, add_dirs=None, agent_type="codex", prompt_dir=self.prompt_dir)
@@ -88,10 +90,22 @@ class BreakPipeline:
         items = self._load_items()
         self._validate_items(items)
         os.makedirs(self.reports_dir, exist_ok=True)
+        requirements_analyst = self._create_agent("小需求需求分析", "item_requirements_analyst.md")
+        requirements_reviewer = self._create_agent("小需求需求评审", "item_requirements_reviewer.md")
         developer = self._create_agent("小需求开发", "item_developer.md")
         tester = self._create_agent("小需求测试", "item_tester.md")
         reviewer = self._create_agent("小需求代码审查", "item_code_reviewer.md")
         while item := self._next_runnable_item(items):
+            if item.status in {"待需求分析", "待需求评审", "需求返工中"}:
+                self._run_item_requirements(item, requirements_analyst, requirements_reviewer)
+                items = self._load_items()
+                self._validate_items(items)
+                continue
+            if item.status == "待需求人工确认":
+                self._resume_requirements_human_gate(item)
+                items = self._load_items()
+                self._validate_items(items)
+                continue
             if item.status == "待人工确认":
                 self._resume_human_gate(item)
                 items = self._load_items()
@@ -104,6 +118,42 @@ class BreakPipeline:
         if unfinished:
             self._mark_blocked_items(items)
             raise RuntimeError("没有可执行的小需求；请检查 requirements/index.md 中的阻塞状态和依赖。")
+
+    def _run_item_requirements(self, item, analyst, reviewer):
+        requirement_file = os.path.join(self.requirements_dir, item.filename)
+        analysis_report = os.path.join(self.reports_dir, f"{item.requirement_id}-requirements-analysis.md")
+        review_report = os.path.join(self.reports_dir, f"{item.requirement_id}-requirements-review.md")
+        self._set_status(item.requirement_id, "待需求评审")
+        analysis_message = (
+            f"只分析当前需求 {item.requirement_id}。阅读并完善 {requirement_file}，补全范围、影响、边界、异常、验收标准、依赖和风险；写 {analysis_report}。不得修改其他需求。"
+        )
+        feedback = self._pending_requirement_feedback.pop(item.requirement_id, None)
+        if feedback:
+            analysis_message += f"\n需要处理的需求变更意见：{feedback}"
+        analyst.send_message(analysis_message)
+        while True:
+            review = reviewer.send_message(
+                f"只评审当前需求 {item.requirement_id}。阅读 {requirement_file} 和 {analysis_report}，将结论写入 {review_report}。通过时必须包含「{REQUIREMENTS_APPROVAL}」，否则给出具体修改意见。"
+            )
+            if not review or not review.strip():
+                raise RuntimeError(f"需求 {item.requirement_id} 的需求评审未返回结论。")
+            if REQUIREMENTS_APPROVAL not in review:
+                self._set_status(item.requirement_id, "需求返工中")
+                analyst.send_message(f"当前需求 {item.requirement_id} 的需求评审意见：{review}\n请仅修订当前需求文档。")
+                self._set_status(item.requirement_id, "待需求评审")
+                continue
+            self._set_status(item.requirement_id, "待需求人工确认")
+            feedback = human_gate(f"2. 小需求 {item.requirement_id} 需求分析", requirement_file)
+            if feedback is None:
+                self._set_status(item.requirement_id, "待实施")
+                return
+            self._set_status(item.requirement_id, "需求返工中")
+            analyst.send_message(f"当前需求 {item.requirement_id} 的需求人工审核意见：{feedback}\n请仅修订当前需求文档。")
+            self._set_status(item.requirement_id, "待需求评审")
+
+    def _resume_requirements_human_gate(self, item):
+        feedback = human_gate(f"2. 小需求 {item.requirement_id} 需求分析", os.path.join(self.requirements_dir, item.filename))
+        self._set_status(item.requirement_id, "待实施" if feedback is None else "需求返工中")
 
     def _run_item(self, item, developer, tester, reviewer):
         requirement_file = os.path.join(self.requirements_dir, item.filename)
@@ -130,6 +180,10 @@ class BreakPipeline:
             )
             if not review or not review.strip():
                 raise RuntimeError(f"需求 {item.requirement_id} 的代码审查未返回结论。")
+            if self._is_requirement_change(review):
+                self._set_status(item.requirement_id, "待需求分析")
+                self._pending_requirement_feedback[item.requirement_id] = review
+                return
             if ITEM_APPROVAL not in review:
                 developer.send_message(f"当前需求 {item.requirement_id} 的代码审查意见：{review}\n请仅修正当前项。")
                 continue
@@ -137,6 +191,10 @@ class BreakPipeline:
             feedback = human_gate(f"2. 小需求 {item.requirement_id}", requirement_file)
             if feedback is None:
                 self._set_status(item.requirement_id, "已完成")
+                return
+            if self._is_requirement_change(feedback):
+                self._set_status(item.requirement_id, "待需求分析")
+                self._pending_requirement_feedback[item.requirement_id] = feedback
                 return
             self._set_status(item.requirement_id, "返工中")
             developer.send_message(f"当前需求 {item.requirement_id} 的人工审核意见：{feedback}\n请仅修正当前项。")
@@ -147,8 +205,16 @@ class BreakPipeline:
         if feedback is None:
             self._set_status(item.requirement_id, "已完成")
             return
-        self._set_status(item.requirement_id, "返工中")
-        self._pending_human_feedback[item.requirement_id] = feedback
+        if self._is_requirement_change(feedback):
+            self._set_status(item.requirement_id, "待需求分析")
+            self._pending_requirement_feedback[item.requirement_id] = feedback
+        else:
+            self._set_status(item.requirement_id, "返工中")
+            self._pending_human_feedback[item.requirement_id] = feedback
+
+    @staticmethod
+    def _is_requirement_change(feedback):
+        return isinstance(feedback, str) and feedback.strip().startswith("需求变更:")
 
     def _load_items(self):
         try:
@@ -221,7 +287,7 @@ class BreakPipeline:
     def _next_runnable_item(items):
         completed = {item.requirement_id for item in items if item.status == "已完成"}
         for item in items:
-            if item.status in {"待实施", "返工中", "开发中", "待人工确认"} and set(item.dependencies) <= completed:
+            if item.status in {"待需求分析", "待需求评审", "需求返工中", "待需求人工确认", "待实施", "返工中", "开发中", "待人工确认"} and set(item.dependencies) <= completed:
                 return item
         return None
 
