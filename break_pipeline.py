@@ -39,7 +39,7 @@ class BreakPipeline:
         self._pending_requirement_feedback = {}
 
     def _create_agent(self, name, prompt_file):
-        agent = Agent(name, prompt_file, self.work_dir, add_dirs=None, agent_type="codex", prompt_dir=self.prompt_dir)
+        agent = Agent(name, prompt_file, self.work_dir, add_dirs=None, agent_type="cursor", prompt_dir=self.prompt_dir)
         self.agents[name] = agent
         return agent
 
