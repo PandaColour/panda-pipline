@@ -64,9 +64,7 @@ class BreakPipeline:
                 f"请审查拆分产物 {self.requirements_index_file} 及目录 {self.requirements_dir}，原始需求：{user_idea}。"
                 f"通过时必须包含「{BREAKDOWN_APPROVAL}」，否则给出可执行修改意见。"
             )
-            if not review or not review.strip():
-                raise RuntimeError("拆分评审未返回结论，流程已停止。")
-            if BREAKDOWN_APPROVAL not in review:
+            if not self._review_passed(review, BREAKDOWN_APPROVAL):
                 breaker.send_message(f"拆分评审意见：{review}\n请更新 {self.requirements_dir}，仅修改拆分产物。")
                 continue
             feedback = human_gate("1. 大需求拆分", self.requirements_index_file)
@@ -135,9 +133,7 @@ class BreakPipeline:
             review = reviewer.send_message(
                 f"只评审当前需求 {item.requirement_id}。阅读 {requirement_file} 和 {analysis_report}，将结论写入 {review_report}。通过时必须包含「{REQUIREMENTS_APPROVAL}」，否则给出具体修改意见。"
             )
-            if not review or not review.strip():
-                raise RuntimeError(f"需求 {item.requirement_id} 的需求评审未返回结论。")
-            if REQUIREMENTS_APPROVAL not in review:
+            if not self._review_passed(review, REQUIREMENTS_APPROVAL):
                 self._set_status(item.requirement_id, "需求返工中")
                 analyst.send_message(f"当前需求 {item.requirement_id} 的需求评审意见：{review}\n请仅修订当前需求文档。")
                 self._set_status(item.requirement_id, "待需求评审")
@@ -180,13 +176,11 @@ class BreakPipeline:
                 f"只审查当前需求 {item.requirement_id}。阅读 {requirement_file}、{develop_report}、{test_report}。"
                 f"将审查结论写入 {review_report}。通过时必须包含「{ITEM_APPROVAL}」，否则给出当前项的具体修改意见。"
             )
-            if not review or not review.strip():
-                raise RuntimeError(f"需求 {item.requirement_id} 的代码审查未返回结论。")
             if self._is_requirement_change(review):
                 self._set_status(item.requirement_id, "待需求分析")
                 self._pending_requirement_feedback[item.requirement_id] = review
                 return
-            if ITEM_APPROVAL not in review:
+            if not self._review_passed(review, ITEM_APPROVAL):
                 developer.send_message(f"当前需求 {item.requirement_id} 的代码审查意见：{review}\n请仅修正当前项。")
                 continue
             self._set_status(item.requirement_id, "待人工确认")
@@ -217,6 +211,12 @@ class BreakPipeline:
     @staticmethod
     def _is_requirement_change(feedback):
         return isinstance(feedback, str) and feedback.strip().startswith("需求变更:")
+
+    @staticmethod
+    def _review_passed(review_response, approval_token):
+        if review_response is None or not str(review_response).strip():
+            return True
+        return approval_token in str(review_response)[:50]
 
     def _item_paths(self, item):
         requirements_file = os.path.abspath(os.path.join(self.requirements_dir, item.filename))

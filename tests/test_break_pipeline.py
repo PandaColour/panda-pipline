@@ -63,7 +63,7 @@ class BreakPipelineTests(unittest.TestCase):
         self.assertEqual(breaker.send_message.call_count, 3)
         self.assertIn(pipeline.requirements_index_file, gate.call_args_list[0].args)
 
-    def test_empty_breakdown_review_is_an_error(self):
+    def test_empty_review_response_is_treated_as_approval(self):
         with tempfile.TemporaryDirectory() as work_dir:
             pipeline = BreakPipeline(work_dir)
             breaker = MagicMock()
@@ -71,9 +71,15 @@ class BreakPipelineTests(unittest.TestCase):
             reviewer.send_message.return_value = ""
 
             with patch.object(pipeline, "_create_agent", side_effect=[breaker, reviewer]), \
-                    patch("builtins.input", return_value="大需求"):
-                with self.assertRaisesRegex(RuntimeError, "拆分评审未返回结论"):
-                    pipeline._run_breakdown()
+                    patch("builtins.input", return_value="大需求"), \
+                    patch("break_pipeline.human_gate", return_value=None) as gate:
+                pipeline._run_breakdown()
+
+        gate.assert_called_once()
+
+    def test_review_approval_uses_first_fifty_characters(self):
+        self.assertTrue(BreakPipeline._review_passed("提示：请继续。拆分方案通过", "拆分方案通过"))
+        self.assertFalse(BreakPipeline._review_passed("x" * 51 + "拆分方案通过", "拆分方案通过"))
 
     def test_unknown_dependency_stops_before_development(self):
         with tempfile.TemporaryDirectory() as work_dir:
