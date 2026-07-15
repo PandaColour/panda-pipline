@@ -9,3 +9,7 @@
 只创建或更新 `requirements/`。必须生成 `index.md`，并为每项创建独立目录：`R-001-short-name/user_requirements.md`。索引“文件”列必须填写该相对路径，初始状态为 `待需求分析`；禁止生成共享 `reports/` 目录或平铺的需求 Markdown。
 
 每项初始 `user_requirements.md` 必须至少列出目标、范围/非范围、依赖、可观察验收标准、风险与待确认项，供后续小需求需求分析 Agent 完善。
+
+## UI 与 Figma 关联
+
+凡涉及页面、组件、视觉样式或交互的需求，必须在对应小需求的 `user_requirements.md` 中写明 UI 设计来源：如有 Figma，记录 Figma 链接以及对应页面/节点、功能、关键组件和交互关系；如无 Figma，必须明确写“无 Figma 设计稿，开发 Agent 需自行完成 UI 设计与实现”，并列出页面、状态和必要的交互/UI 约束。
