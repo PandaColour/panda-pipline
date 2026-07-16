@@ -72,6 +72,8 @@ def parse_stream(json_line, stream_state):
         text = _extract_text(data)
     elif event_type == "result":
         text = _extract_text(data)
+        if text:
+            stream_state["final_text"] = text
     elif event_type == "system":
         text = ""
     elif event_type in {"content_block_stop", "message_start", "message_delta", "message_stop", "user", "ping"}:
@@ -104,7 +106,7 @@ class ClaudeAgent:
             process.stdin.write(message)
             process.stdin.close()
             text_parts = []
-            stream_state = {"session_id": session_id}
+            stream_state = {"session_id": session_id, "final_text": None}
             while True:
                 line = process.stdout.readline()
                 if not line and process.poll() is not None:
@@ -115,6 +117,11 @@ class ClaudeAgent:
                         text_parts.append(text)
             process.wait()
             error = None if process.returncode == 0 else f"Claude exited with code {process.returncode}"
-            return AgentRunResult("".join(text_parts), stream_state["session_id"], process.returncode, error)
+            return AgentRunResult(
+                stream_state["final_text"] or "".join(text_parts),
+                stream_state["session_id"],
+                process.returncode,
+                error,
+            )
         except Exception as error:
             return AgentRunResult("", session_id, -1, str(error))

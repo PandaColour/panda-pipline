@@ -61,6 +61,18 @@ class CodexAgentTests(unittest.TestCase):
         process.stdin.close.assert_called_once()
         self.assertEqual(result, "continued")
 
+    def test_prefers_completed_agent_message_over_streamed_progress_text(self):
+        process = self._process(
+            '{"type":"thread.started","thread_id":"codex-thread"}',
+            '{"type":"agent_message_delta","delta":"正在审查需求。"}',
+            '{"type":"item.completed","item":{"type":"agent_message","text":"同意方案\\n需求完整。"}}',
+        )
+
+        with patch("agents.codex.subprocess.Popen", return_value=process):
+            result = Agent("codex", "prompt.md", "/work/repo", agent_type="codex").send_message("审查")
+
+        self.assertTrue(result.startswith("同意方案"))
+
 
 if __name__ == "__main__":
     unittest.main()

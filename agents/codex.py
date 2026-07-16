@@ -47,6 +47,8 @@ def parse_stream(json_line, stream_state):
         item = data.get("item", {})
         if item.get("type") == "agent_message":
             text = item.get("text", "")
+            if event_type == "item.completed" and text:
+                stream_state["final_text"] = text
         elif item.get("type") in {"reasoning", "thinking"}:
             sys.stdout.write("\r[Codex thinking] ")
             sys.stdout.flush()
@@ -91,7 +93,7 @@ class CodexAgent:
             process.stdin.write(prompt)
             process.stdin.close()
             text_parts = []
-            stream_state = {"session_id": session_id}
+            stream_state = {"session_id": session_id, "final_text": None}
             while True:
                 line = process.stdout.readline()
                 if not line and process.poll() is not None:
@@ -102,6 +104,11 @@ class CodexAgent:
                         text_parts.append(text)
             process.wait()
             error = None if process.returncode == 0 else f"Codex exited with code {process.returncode}"
-            return AgentRunResult("".join(text_parts), stream_state["session_id"], process.returncode, error)
+            return AgentRunResult(
+                stream_state["final_text"] or "".join(text_parts),
+                stream_state["session_id"],
+                process.returncode,
+                error,
+            )
         except Exception as error:
             return AgentRunResult("", session_id, -1, str(error))

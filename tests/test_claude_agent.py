@@ -55,6 +55,17 @@ class ClaudeAgentTests(unittest.TestCase):
         process.stdin.close.assert_called_once()
         self.assertEqual(result, "continued")
 
+    def test_prefers_final_result_over_streamed_progress_text(self):
+        process = self._process(
+            '{"type":"assistant","session_id":"claude-session","message":{"content":[{"type":"text","text":"正在审查需求。"}]}}',
+            '{"type":"result","subtype":"success","session_id":"claude-session","result":"同意方案\\n需求完整。"}',
+        )
+
+        with patch("agents.claude.subprocess.Popen", return_value=process):
+            result = Agent("claude", "prompt.md", "/work/repo", agent_type="claude").send_message("审查")
+
+        self.assertTrue(result.startswith("同意方案"))
+
 
 if __name__ == "__main__":
     unittest.main()

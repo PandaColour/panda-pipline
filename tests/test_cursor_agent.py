@@ -73,6 +73,18 @@ class CursorAgentTests(unittest.TestCase):
         self.assertEqual(cmd[-1], "Continue task")
         self.assertEqual(result, "continued")
 
+    def test_uses_last_assistant_message_when_cursor_omits_result_event(self):
+        process = self._process(
+            '{"type":"assistant","timestamp_ms":1,"message":{"content":[{"type":"text","text":"正在审查需求。"}]}}',
+            '{"type":"assistant","timestamp_ms":2,"message":{"content":[{"type":"text","text":"同意方案\\n需求完整。"}]}}',
+        )
+
+        with patch("agents.cursor.build_cursor_base_cmd", return_value=["agent", "-p"]), \
+                patch("agents.cursor.subprocess.Popen", return_value=process):
+            result = CursorAgent().run("/work/repo", "审查")
+
+        self.assertTrue(result.text.startswith("同意方案"))
+
     def test_retries_keepalive_timeout_once_after_three_seconds(self):
         timed_out_process = self._process(
             "RetriableError: [internal] HTTP/2 keepalive ping timed out after 5000ms",

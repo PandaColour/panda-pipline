@@ -83,6 +83,8 @@ def parse_stream(json_line, stream_state):
             stream_state["saw_streaming_assistant"] = True
         elif stream_state.get("saw_streaming_assistant"):
             return ""
+        if text:
+            stream_state["last_assistant_text"] = text
     elif event_type == "result":
         text = data.get("result", "")
         if text:
@@ -151,6 +153,7 @@ class CursorAgent:
                 "session_id": session_id,
                 "saw_streaming_assistant": False,
                 "result_text": None,
+                "last_assistant_text": None,
             }
             while True:
                 line = process.stdout.readline()
@@ -166,7 +169,7 @@ class CursorAgent:
                 f"Cursor exited with code {process.returncode}"
             )
             return AgentRunResult(
-                stream_state["result_text"] or "".join(text_parts), stream_state["session_id"],
+                stream_state["result_text"] or stream_state["last_assistant_text"] or "".join(text_parts), stream_state["session_id"],
                 process.returncode, error,
             )
         except Exception as error:
