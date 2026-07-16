@@ -4,6 +4,7 @@ import os
 from dataclasses import dataclass
 
 from agents import Agent
+from execution_plan import ExecutionPlanStore
 from workflow import human_gate
 
 
@@ -32,6 +33,8 @@ class BreakPipeline:
         self.work_dir = os.path.abspath(work_dir)
         self.requirements_dir = os.path.join(self.work_dir, "requirements")
         self.requirements_index_file = os.path.join(self.requirements_dir, "index.md")
+        self.execution_plan = ExecutionPlanStore(self.requirements_dir, self.requirements_index_file)
+        self.execution_plan_file = self.execution_plan.plan_file
         self.breakdown_approval_file = os.path.join(self.requirements_dir, ".breakdown-approved")
         self.prompt_dir = BREAK_SYSTEM_PROMPT_DIR
         self.agents = {}
@@ -84,6 +87,7 @@ class BreakPipeline:
 
     def _run_execution(self):
         print("\n" + "=" * 60 + "\n💻 阶段 2: 按小需求实施\n" + "=" * 60)
+        self._ensure_execution_plan()
         items = self._load_items()
         self._validate_items(items)
         requirements_analyst = self._create_agent("小需求需求分析", "item_requirements_analyst.md")
@@ -233,43 +237,78 @@ class BreakPipeline:
         }
 
     def _load_items(self):
-        try:
-            with open(self.requirements_index_file, encoding="utf-8") as index_file:
-                lines = index_file.read().splitlines()
-        except FileNotFoundError as error:
-            raise ValueError(f"缺少需求索引: {self.requirements_index_file}") from error
-        if len(lines) < 2:
-            raise ValueError("需求索引缺少表头。")
-        expected_header = ["顺序", "ID", "名称", "状态", "前置依赖", "文件", "验收摘要"]
-        header = self._parse_table_row(lines[0])
-        separator = self._parse_table_row(lines[1])
-        if header != expected_header or len(separator) != len(expected_header) or not all(
-            cell and set(cell) == {"-"} for cell in separator
-        ):
-            raise ValueError("索引表头不符合约定。")
-        items = []
-        for line in lines[2:]:
-            if not line.strip():
-                continue
-            cells = self._parse_table_row(line)
-            if cells is None or len(cells) != 7:
-                raise ValueError(f"无效索引行: {line}")
-            try:
-                order = int(cells[0])
-            except ValueError as error:
-                raise ValueError(f"无效需求顺序: {cells[0]}") from error
-            dependencies = [] if cells[4] in {"", "无", "-"} else [value.strip() for value in cells[4].split(",")]
-            items.append(RequirementItem(order, cells[1], cells[2], cells[3], dependencies, cells[5], cells[6]))
-        if not items:
-            raise ValueError("需求索引没有可执行条目。")
+        self._ensure_execution_plan()
+        plan = self.execution_plan.read()
+        self.execution_plan.validate(plan, VALID_STATUSES, self.execution_plan.index_hash())
+        items = [
+            RequirementItem(
+                raw_item["order"], raw_item["id"], raw_item["name"], raw_item["status"],
+                raw_item["dependencies"], raw_item["requirements_file"], raw_item["acceptance_summary"],
+            )
+            for raw_item in plan["items"]
+        ]
+        self._validate_items(items)
         return sorted(items, key=lambda item: item.order)
 
-    @staticmethod
-    def _parse_table_row(line):
-        stripped = line.strip()
-        if not (stripped.startswith("|") and stripped.endswith("|")):
+    def _ensure_execution_plan(self):
+        if self.execution_plan.is_current(VALID_STATUSES):
+            self._validate_items_from_plan(self.execution_plan.read())
+            return
+        previous_plan = self._valid_previous_plan()
+        source_hash = self.execution_plan.index_hash()
+        normalizer = self._create_agent("执行索引规范化", "index_normalizer.md")
+        normalizer.send_message(
+            f"请将 {self.requirements_index_file} 规范化为 {self.execution_plan_file}。"
+            f"requirements 目录为 {self.requirements_dir}；当前 index.md 的 SHA-256 为 {source_hash}。"
+            "只写 execution_plan.json，不得修改 index.md 或任何需求、报告、源码文件。"
+        )
+        plan = self.execution_plan.read()
+        self.execution_plan.validate(plan, VALID_STATUSES, expected_source_hash=source_hash)
+        self._validate_items_from_plan(plan)
+        if previous_plan is not None and self._preserve_unchanged_statuses(previous_plan, plan):
+            self.execution_plan.write(plan)
+
+    def _valid_previous_plan(self):
+        try:
+            plan = self.execution_plan.read()
+            self.execution_plan.validate(plan, VALID_STATUSES)
+            self._validate_items_from_plan(plan)
+        except ValueError:
             return None
-        return [cell.strip() for cell in stripped[1:-1].split("|")]
+        return plan
+
+    @staticmethod
+    def _preserve_unchanged_statuses(previous_plan, plan):
+        previous_statuses = {
+            BreakPipeline._item_identity(item): item["status"]
+            for item in previous_plan["items"]
+        }
+        changed = False
+        for item in plan["items"]:
+            previous_status = previous_statuses.get(BreakPipeline._item_identity(item))
+            if previous_status is not None and item["status"] != previous_status:
+                item["status"] = previous_status
+                changed = True
+        return changed
+
+    @staticmethod
+    def _item_identity(item):
+        return (
+            item["id"],
+            item["name"],
+            tuple(item["dependencies"]),
+            item["requirements_file"],
+            item["acceptance_summary"],
+        )
+
+    def _validate_items_from_plan(self, plan):
+        self._validate_items([
+            RequirementItem(
+                raw_item["order"], raw_item["id"], raw_item["name"], raw_item["status"],
+                raw_item["dependencies"], raw_item["requirements_file"], raw_item["acceptance_summary"],
+            )
+            for raw_item in plan["items"]
+        ])
 
     def _validate_items(self, items):
         ids = set()
@@ -285,6 +324,8 @@ class BreakPipeline:
             orders.add(item.order)
             if item.status not in VALID_STATUSES:
                 raise ValueError(f"未知需求状态: {item.status}")
+            if os.path.isabs(item.filename) or os.path.normpath(item.filename) != item.filename:
+                raise ValueError("需求文件必须使用 requirements 下的规范相对路径。")
             requirement_path = os.path.abspath(os.path.join(self.requirements_dir, item.filename))
             if os.path.commonpath([self.requirements_dir, requirement_path]) != self.requirements_dir:
                 raise ValueError("需求文件必须位于 requirements 目录。")
@@ -316,17 +357,13 @@ class BreakPipeline:
                 self._set_status(item.requirement_id, "阻塞")
 
     def _set_status(self, requirement_id, status):
-        with open(self.requirements_index_file, encoding="utf-8") as index_file:
-            lines = index_file.read().splitlines()
-        updated = []
-        for line in lines:
-            cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
-            if len(cells) == 7 and cells[1] == requirement_id:
-                cells[3] = status
-                line = "| " + " | ".join(cells) + " |"
-            updated.append(line)
-        with open(self.requirements_index_file, "w", encoding="utf-8") as index_file:
-            index_file.write("\n".join(updated) + "\n")
+        self._ensure_execution_plan()
+        self.execution_plan.set_status(
+            requirement_id,
+            status,
+            VALID_STATUSES,
+            expected_source_hash=self.execution_plan.index_hash(),
+        )
 
     def _run_final_reflection(self):
         for agent in self.agents.values():

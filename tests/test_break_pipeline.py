@@ -1,3 +1,5 @@
+import hashlib
+import json
 import os
 import tempfile
 import unittest
@@ -110,7 +112,8 @@ class BreakPipelineTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "没有可执行的小需求"):
                 pipeline._run_execution()
 
-            self.assertIn("| R-002 | name | 阻塞 |", Path(pipeline.requirements_index_file).read_text(encoding="utf-8"))
+            plan = json.loads(Path(pipeline.execution_plan_file).read_text(encoding="utf-8"))
+            self.assertEqual(plan["items"][1]["status"], "阻塞")
 
     def test_index_rejects_paths_outside_requirements_directory(self):
         with tempfile.TemporaryDirectory() as work_dir:
@@ -125,14 +128,7 @@ class BreakPipelineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as work_dir:
             pipeline = BreakPipeline(work_dir)
             self._write_requirement_files(work_dir, "R-001")
-            Path(pipeline.requirements_index_file).write_text(
-                "| order | ID | 名称 | 状态 | 前置依赖 | 文件 | 验收摘要 |\n"
-                "| --- | --- | --- | --- | --- | --- | --- |\n"
-                "| 1 | R-001 | name | 待实施 | 无 | 001-first.md | ok |\n",
-                encoding="utf-8",
-            )
-
-            with self.assertRaisesRegex(ValueError, "索引表头不符合约定"):
+            with self.assertRaisesRegex(ValueError, "缺少需求索引"):
                 pipeline._load_items()
 
     def test_execution_creates_reports_directory(self):
@@ -203,7 +199,8 @@ class BreakPipelineTests(unittest.TestCase):
                 pipeline._run_execution()
 
             developer.send_message.assert_not_called()
-            self.assertIn("已完成", Path(pipeline.requirements_index_file).read_text(encoding="utf-8"))
+            plan = json.loads(Path(pipeline.execution_plan_file).read_text(encoding="utf-8"))
+            self.assertEqual(plan["items"][0]["status"], "已完成")
 
     def test_item_requirement_gates_run_before_development(self):
         with tempfile.TemporaryDirectory() as work_dir:
@@ -224,7 +221,8 @@ class BreakPipelineTests(unittest.TestCase):
             self.assertEqual(analyst.send_message.call_count, 1)
             self.assertEqual(requirements_reviewer.send_message.call_count, 1)
             self.assertEqual(developer.send_message.call_count, 1)
-            self.assertIn("已完成", Path(pipeline.requirements_index_file).read_text(encoding="utf-8"))
+            plan = json.loads(Path(pipeline.execution_plan_file).read_text(encoding="utf-8"))
+            self.assertEqual(plan["items"][0]["status"], "已完成")
 
     def test_item_requirement_review_feedback_retries_only_current_analyst(self):
         with tempfile.TemporaryDirectory() as work_dir:
@@ -306,9 +304,27 @@ class BreakPipelineTests(unittest.TestCase):
             lines.append(
                 f"| {order} | {requirement_id} | name | {status} | {dependencies} | {filename} | ok |"
             )
-        (Path(work_dir) / "requirements" / "index.md").write_text(
-            "\n".join(lines) + "\n", encoding="utf-8"
-        )
+        requirements_dir = Path(work_dir) / "requirements"
+        index_file = requirements_dir / "index.md"
+        index_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        items = []
+        for order, requirement_id, status, dependencies, filename in rows:
+            if filename in {"001-first.md", "002-second.md"}:
+                filename = f"R-{order:03d}-{'first' if order == 1 else 'second'}/user_requirements.md"
+            items.append({
+                "order": order,
+                "id": requirement_id,
+                "name": "name",
+                "status": status,
+                "dependencies": [] if dependencies in {"无", "-", ""} else dependencies.split(","),
+                "requirements_file": filename,
+                "acceptance_summary": "ok",
+            })
+        (requirements_dir / "execution_plan.json").write_text(json.dumps({
+            "schema_version": 1,
+            "source_index_sha256": hashlib.sha256(index_file.read_bytes()).hexdigest(),
+            "items": items,
+        }, ensure_ascii=False), encoding="utf-8")
 
 
 if __name__ == "__main__":
