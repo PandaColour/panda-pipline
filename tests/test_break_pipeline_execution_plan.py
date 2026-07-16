@@ -82,6 +82,14 @@ class BreakExecutionPlanTests(unittest.TestCase):
         self.assertIn(str(self.index_file), normalizer.send_message.call_args.args[0])
         self.assertEqual(self.pipeline._load_items()[0].requirement_id, "R-001")
 
+    def test_normalizer_refusal_is_reported_without_masking_it_as_missing_plan(self):
+        normalizer = MagicMock()
+        normalizer.send_message.return_value = "索引表缺少可识别的需求条目"
+
+        with patch.object(self.pipeline, "_create_agent", return_value=normalizer), \
+                self.assertRaisesRegex(ValueError, "索引表缺少可识别的需求条目"):
+            self.pipeline._ensure_execution_plan()
+
     def test_stale_plan_is_replaced_by_normalizer_agent(self):
         stale_plan = self._plan()
         stale_plan["source_index_sha256"] = "0" * 64

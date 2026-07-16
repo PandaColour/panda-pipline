@@ -257,12 +257,17 @@ class BreakPipeline:
         previous_plan = self._valid_previous_plan()
         source_hash = self.execution_plan.index_hash()
         normalizer = self._create_agent("执行索引规范化", "index_normalizer.md")
-        normalizer.send_message(
+        normalizer_response = normalizer.send_message(
             f"请将 {self.requirements_index_file} 规范化为 {self.execution_plan_file}。"
             f"requirements 目录为 {self.requirements_dir}；当前 index.md 的 SHA-256 为 {source_hash}。"
             "只写 execution_plan.json，不得修改 index.md 或任何需求、报告、源码文件。"
         )
-        plan = self.execution_plan.read()
+        try:
+            plan = self.execution_plan.read()
+        except ValueError as error:
+            if isinstance(normalizer_response, str) and normalizer_response.strip():
+                raise ValueError(f"执行索引规范化未生成计划：{normalizer_response.strip()}") from error
+            raise
         self.execution_plan.validate(plan, VALID_STATUSES, expected_source_hash=source_hash)
         self._validate_items_from_plan(plan)
         if previous_plan is not None and self._preserve_unchanged_statuses(previous_plan, plan):

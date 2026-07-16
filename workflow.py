@@ -2,6 +2,14 @@ import os
 import sys
 
 
+_INVISIBLE_INPUT_CHARS = "\u200b\u200c\u200d\ufeff"
+
+
+def normalize_human_input(value):
+    """Treat whitespace and terminal-invisible characters as empty input."""
+    return value.strip().strip(_INVISIBLE_INPUT_CHARS).strip()
+
+
 def human_gate(stage_name, review_file_path=None):
     """Request human approval or feedback before the next pipeline stage."""
     print("\n" + "=" * 50)
@@ -11,7 +19,9 @@ def human_gate(stage_name, review_file_path=None):
     print("=" * 50)
 
     while True:
-        user_input = input("\n👉 请输入指令 [ Enter 键通过 / 输入修改意见让 AI 重做 / 输入 'exit' 退出 ]: ").strip()
+        user_input = normalize_human_input(
+            input("\n👉 请输入指令 [ Enter 键通过 / 输入修改意见让 AI 重做 / 输入 'exit' 退出 ]: ")
+        )
         if user_input.lower() == "exit":
             print("👋 流程被人工终止。")
             sys.exit(0)
