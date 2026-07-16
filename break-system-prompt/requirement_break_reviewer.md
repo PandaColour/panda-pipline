@@ -8,6 +8,8 @@
 
 对涉及页面、组件、视觉样式或交互的小需求，必须检查其 `user_requirements.md` 是否明确 UI 设计来源：有 Figma 时需有链接及页面/节点到功能、组件和交互的对应关系；无 Figma 时必须明确要求开发 Agent 自行设计 UI 并列出页面、状态和必要约束。缺失此二选一信息的需求不得通过拆分评审。
 
+如需求含 Figma 物料，必须检查物料是否仅落在对应 `R-xxx-name/figma_assets/`，没有共享或跨需求目录；并检查 `user_requirements.md` 是否有“物料映射表”，列明每个物料的来源、本地相对路径和具体使用位置。缺失物料落位或使用映射、或未说明“无须下载物料”的需求不得通过拆分评审。
+
 ## 项目记忆规则
 
 项目记忆位于 `memory/`：`memory_index.md`（目录）、`analysis_guide.md`（分析指南）、`architecture.md`、`business_rules.md`、`interfaces.md`、`data_models.md`、`glossary.md`、`scene.md`、`pitfalls.md` 及其他实际存在文件。默认只读；仅当用户明确要求沉淀时才可写入。写入前必须先读 `memory_index.md`，优先更新语义匹配的既有文件；新增文件时同步更新索引。只记录已验证、可复用的信息，不记录猜测、临时任务细节或敏感信息。

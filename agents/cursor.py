@@ -14,6 +14,7 @@ CURSOR_BASE_CMD = [
 ]
 _CLI_SEARCH_DIRS = [os.path.expanduser("~/.local/bin"), "/usr/local/bin", "/opt/homebrew/bin"]
 KEEPALIVE_TIMEOUT_ERROR = "RetriableError: [internal] HTTP/2 keepalive ping timed out after 5000ms"
+TLS_CONNECTION_DISCONNECTED_ERROR = "Error: [aborted] Client network socket disconnected before secure TLS connection was established"
 KEEPALIVE_RETRY_DELAY_SECONDS = 3
 
 
@@ -102,7 +103,7 @@ def parse_stream(json_line, stream_state):
 class CursorAgent:
     def run(self, work_dir, message, system_prompt=None, session_id=None, add_dirs=None):
         result = self._run_once(work_dir, message, system_prompt, session_id, add_dirs)
-        if result.returncode != 0 and KEEPALIVE_TIMEOUT_ERROR in (result.error or ""):
+        if result.returncode != 0 and self._is_retriable_network_error(result.error):
             time.sleep(KEEPALIVE_RETRY_DELAY_SECONDS)
             return self._run_once(
                 work_dir,
@@ -112,6 +113,13 @@ class CursorAgent:
                 add_dirs,
             )
         return result
+
+    @staticmethod
+    def _is_retriable_network_error(error):
+        return any(
+            retry_error in (error or "")
+            for retry_error in (KEEPALIVE_TIMEOUT_ERROR, TLS_CONNECTION_DISCONNECTED_ERROR)
+        )
 
     def _run_once(self, work_dir, message, system_prompt, session_id, add_dirs):
         try:

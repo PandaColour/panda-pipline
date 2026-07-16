@@ -92,6 +92,25 @@ class CursorAgentTests(unittest.TestCase):
         self.assertEqual(popen.call_count, 2)
         sleep.assert_called_once_with(3)
 
+    def test_retries_tls_connection_disconnect_once_after_three_seconds(self):
+        disconnected_process = self._process(
+            "Error: [aborted] Client network socket disconnected before secure TLS connection was established",
+            returncode=1,
+        )
+        successful_process = self._process(
+            '{"type":"result","session_id":"cursor-chat","result":"retried successfully"}',
+        )
+
+        with patch("agents.cursor.build_cursor_base_cmd", return_value=["agent", "-p"]), \
+                patch("agents.cursor.subprocess.Popen", side_effect=[disconnected_process, successful_process]) as popen, \
+                patch("agents.cursor.time.sleep") as sleep:
+            result = CursorAgent().run("/work/repo", "Retry this task")
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.text, "retried successfully")
+        self.assertEqual(popen.call_count, 2)
+        sleep.assert_called_once_with(3)
+
 
 if __name__ == "__main__":
     unittest.main()
