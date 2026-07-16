@@ -1,7 +1,7 @@
 """Entry point for the large-requirement breakdown workflow."""
 
 from break_pipeline import BreakPipeline
-from main import setup_environment
+from environment import setup_environment
 
 
 def main():
