@@ -50,7 +50,7 @@ class Pipeline:
 
         review_response = reviewer.send_message(
             f"请审查 {self.user_requirements_file} 文件中的需求分析，原始需求: {user_idea}"
-            f"评估其完整性、一致性和可行性。如果满意，请在回复中明确包含「同意方案」。"
+            f"评估其完整性、一致性和可行性。如果满意，最终回复第一行先输出「同意方案」，且位于前 50 个字符内。"
             f"如果不满意，请提供具体的修改建议。"
         )
 
@@ -74,7 +74,7 @@ class Pipeline:
 
             review_response = reviewer.send_message(
                 f"请继续审查 {self.user_requirements_file} 文件中的需求分析,分析agent对它进行了一些修改"
-                f"评估其完整性、一致性和可行性。如果满意，请在回复中明确包含「同意方案」。"
+                f"评估其完整性、一致性和可行性。如果满意，最终回复第一行先输出「同意方案」，且位于前 50 个字符内。"
                 f"如果不满意，请提供具体的修改建议。"
             )
 
@@ -109,7 +109,7 @@ class Pipeline:
                 f"{self.develop_report_file} 和 "
                 f"{self.test_report_file}，"
                 f"然后审查 {self.work_dir} 下的代码和 {self.work_dir} 下的测试。"
-                f"如果所有检查通过，请在回复中明确包含「任务完成」。"
+                f"如果所有检查通过，最终回复第一行先输出「任务完成」，且位于前 50 个字符内。"
                 f"否则请提供具体的修改建议。"
             )
 
