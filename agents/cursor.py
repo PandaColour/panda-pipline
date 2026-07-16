@@ -3,6 +3,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 
 from ._result import AgentRunResult
 from ._cli import executable_name
@@ -12,6 +13,8 @@ CURSOR_BASE_CMD = [
     executable_name("agent"), "-p", "--force", "--output-format", "stream-json", "--stream-partial-output",
 ]
 _CLI_SEARCH_DIRS = [os.path.expanduser("~/.local/bin"), "/usr/local/bin", "/opt/homebrew/bin"]
+KEEPALIVE_TIMEOUT_ERROR = "RetriableError: [internal] HTTP/2 keepalive ping timed out after 5000ms"
+KEEPALIVE_RETRY_DELAY_SECONDS = 3
 
 
 def _extended_path():
@@ -98,6 +101,19 @@ def parse_stream(json_line, stream_state):
 
 class CursorAgent:
     def run(self, work_dir, message, system_prompt=None, session_id=None, add_dirs=None):
+        result = self._run_once(work_dir, message, system_prompt, session_id, add_dirs)
+        if result.returncode != 0 and KEEPALIVE_TIMEOUT_ERROR in (result.error or ""):
+            time.sleep(KEEPALIVE_RETRY_DELAY_SECONDS)
+            return self._run_once(
+                work_dir,
+                message,
+                system_prompt,
+                result.session_id or session_id,
+                add_dirs,
+            )
+        return result
+
+    def _run_once(self, work_dir, message, system_prompt, session_id, add_dirs):
         try:
             cmd = build_cursor_base_cmd()
         except FileNotFoundError as error:
@@ -122,6 +138,7 @@ class CursorAgent:
                 encoding="utf-8", bufsize=1,
             )
             text_parts = []
+            raw_output_parts = []
             stream_state = {
                 "session_id": session_id,
                 "saw_streaming_assistant": False,
@@ -132,11 +149,14 @@ class CursorAgent:
                 if not line and process.poll() is not None:
                     break
                 if line:
+                    raw_output_parts.append(line)
                     text = parse_stream(line, stream_state)
                     if text:
                         text_parts.append(text)
             process.wait()
-            error = None if process.returncode == 0 else f"Cursor exited with code {process.returncode}"
+            error = None if process.returncode == 0 else "".join(raw_output_parts).strip() or (
+                f"Cursor exited with code {process.returncode}"
+            )
             return AgentRunResult(
                 stream_state["result_text"] or "".join(text_parts), stream_state["session_id"],
                 process.returncode, error,

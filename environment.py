@@ -6,7 +6,7 @@ import subprocess
 
 PROJECT_ROOT = r"/Users/panda.colour/Company/ios"
 REPOS = [
-    ("http://8.129.23.111:5720/java-group/credit-core/ginkgo.git", "feature/hjc/wavie_optimize_agent_develop")
+    ("https://gitee.com/meiyingda1/ai-test.git", "master")
 ]
 
 
