@@ -26,6 +26,118 @@ class BreakPipelineTests(unittest.TestCase):
         self.assertEqual(paths["develop"], os.path.join(pipeline.requirements_dir, "R-001-login", "develop_report.md"))
         self.assertEqual(paths["test"], os.path.join(pipeline.requirements_dir, "R-001-login", "test_report.md"))
         self.assertEqual(paths["code_review"], os.path.join(pipeline.requirements_dir, "R-001-login", "code_review.md"))
+
+    def test_item_artifacts_include_memory_report(self):
+        pipeline = BreakPipeline("workspace")
+        item = RequirementItem(
+            1, "R-001", "login", "待实施", [],
+            "R-001-login/user_requirements.md", "ok",
+        )
+
+        paths = pipeline._item_paths(item)
+
+        self.assertEqual(
+            paths["memory_report"],
+            os.path.join(pipeline.requirements_dir, "R-001-login", "memory_report.md"),
+        )
+
+    def test_memory_status_is_runnable(self):
+        pipeline = BreakPipeline("workspace")
+        item = RequirementItem(1, "R-001", "login", "待记忆整理", [], "R-001-login/user_requirements.md", "ok")
+
+        self.assertIs(pipeline._next_runnable_item([item]), item)
+
+    def test_same_item_reuses_its_agent_set_for_rework(self):
+        pipeline = BreakPipeline("workspace")
+        item = RequirementItem(1, "R-001", "login", "待实施", [], "R-001-login/user_requirements.md", "ok")
+
+        with patch.object(pipeline, "_create_agent", side_effect=lambda name, prompt: MagicMock(name=name)) as create_agent:
+            first = pipeline._item_agents(item)
+            second = pipeline._item_agents(item)
+
+        self.assertIs(first, second)
+        self.assertEqual(create_agent.call_count, 6)
+        self.assertEqual(set(first), {"analyst", "requirements_reviewer", "developer", "tester", "code_reviewer", "memory_curator"})
+
+    def test_different_items_get_different_agent_sets(self):
+        pipeline = BreakPipeline("workspace")
+        first_item = RequirementItem(1, "R-001", "first", "待实施", [], "R-001-first/user_requirements.md", "ok")
+        second_item = RequirementItem(2, "R-002", "second", "待实施", [], "R-002-second/user_requirements.md", "ok")
+
+        with patch.object(pipeline, "_create_agent", side_effect=lambda name, prompt: MagicMock(name=name)) as create_agent:
+            first = pipeline._item_agents(first_item)
+            second = pipeline._item_agents(second_item)
+
+        self.assertIsNot(first, second)
+        self.assertEqual(create_agent.call_count, 12)
+
+    def test_memory_completion_releases_current_item_agents(self):
+        pipeline = BreakPipeline("workspace")
+        agent = MagicMock()
+        agent.name = "R-001 小需求开发"
+        pipeline._active_item_agents["R-001"] = {"developer": agent}
+        pipeline.agents[agent.name] = agent
+
+        pipeline._release_item_agents("R-001")
+
+        self.assertNotIn("R-001", pipeline._active_item_agents)
+        self.assertNotIn(agent.name, pipeline.agents)
+
+    def test_code_approval_runs_memory_curation_before_completion(self):
+        with tempfile.TemporaryDirectory() as work_dir:
+            pipeline = BreakPipeline(work_dir)
+            self._write_requirement_files(work_dir, "R-001")
+            self._write_index(work_dir, [(1, "R-001", "待实施", "无", "001-first.md")])
+            agents = self._item_agent_set()
+            agents["code_reviewer"].send_message.return_value = "任务完成"
+
+            with patch.object(pipeline, "_item_agents", return_value=agents), \
+                    patch("break_pipeline.human_gate", return_value=None):
+                pipeline._run_execution()
+
+            agents["memory_curator"].send_message.assert_called_once()
+            plan = json.loads(Path(pipeline.execution_plan_file).read_text(encoding="utf-8"))
+            self.assertEqual(plan["items"][0]["status"], "已完成")
+
+    def test_restart_at_memory_status_only_runs_curator(self):
+        with tempfile.TemporaryDirectory() as work_dir:
+            pipeline = BreakPipeline(work_dir)
+            self._write_requirement_files(work_dir, "R-001")
+            self._write_index(work_dir, [(1, "R-001", "待记忆整理", "无", "001-first.md")])
+            agents = self._item_agent_set()
+
+            with patch.object(pipeline, "_item_agents", return_value=agents):
+                pipeline._run_execution()
+
+            agents["developer"].send_message.assert_not_called()
+            agents["memory_curator"].send_message.assert_called_once()
+
+    def test_final_reflection_only_calls_breakdown_agent(self):
+        with tempfile.TemporaryDirectory() as work_dir:
+            pipeline = BreakPipeline(work_dir)
+            self._write_requirement_files(work_dir, "R-001")
+            self._write_index(work_dir, [(1, "R-001", "已完成", "无", "001-first.md")])
+            item_agent = MagicMock()
+            pipeline.agents["R-001 小需求开发"] = item_agent
+            breakdown_agent = MagicMock()
+
+            with patch.object(pipeline, "_create_agent", return_value=breakdown_agent) as create_agent:
+                pipeline._run_final_reflection()
+
+            create_agent.assert_called_once_with("需求拆分记忆整理", "requirement_breaker.md")
+            breakdown_agent.send_message.assert_called_once()
+            item_agent.send_message.assert_not_called()
+
+    @staticmethod
+    def _item_agent_set():
+        return {
+            "analyst": MagicMock(),
+            "requirements_reviewer": MagicMock(),
+            "developer": MagicMock(),
+            "tester": MagicMock(),
+            "code_reviewer": MagicMock(),
+            "memory_curator": MagicMock(),
+        }
     def test_agent_loads_prompt_from_explicit_prompt_directory(self):
         with tempfile.TemporaryDirectory() as directory:
             prompt_dir = Path(directory)
@@ -116,6 +228,32 @@ class BreakPipelineTests(unittest.TestCase):
             plan = json.loads(Path(pipeline.execution_plan_file).read_text(encoding="utf-8"))
             self.assertEqual(plan["items"][1]["status"], "阻塞")
 
+    def test_only_blocked_dependency_chain_ends_execution_without_error(self):
+        with tempfile.TemporaryDirectory() as work_dir:
+            pipeline = BreakPipeline(work_dir)
+            self._write_requirement_files(work_dir, "R-001", "R-002", "R-003")
+            self._write_index(work_dir, [
+                (1, "R-001", "已完成", "无", "001-first.md"),
+                (2, "R-002", "阻塞", "R-001", "002-second.md"),
+                (3, "R-003", "待需求分析", "R-002", "R-003-second/user_requirements.md"),
+            ])
+
+            completed = pipeline._run_execution()
+
+        self.assertFalse(completed)
+
+    def test_blocked_execution_does_not_run_final_reflection(self):
+        with tempfile.TemporaryDirectory() as work_dir:
+            pipeline = BreakPipeline(work_dir)
+            Path(pipeline.requirements_dir).mkdir()
+            Path(pipeline.breakdown_approval_file).write_text("approved\n", encoding="utf-8")
+
+            with patch.object(pipeline, "_run_execution", return_value=False), \
+                    patch.object(pipeline, "_run_final_reflection") as reflection:
+                pipeline.run()
+
+        reflection.assert_not_called()
+
     def test_index_rejects_paths_outside_requirements_directory(self):
         with tempfile.TemporaryDirectory() as work_dir:
             pipeline = BreakPipeline(work_dir)
@@ -139,9 +277,9 @@ class BreakPipelineTests(unittest.TestCase):
             workspace.mkdir(parents=True)
             (workspace / "user_requirements.md").write_text("# R-001\n", encoding="utf-8")
             self._write_index(work_dir, [(1, "R-001", "待实施", "无", "R-001-first/user_requirements.md")])
-            developer, tester, reviewer = MagicMock(), MagicMock(), MagicMock()
-            reviewer.send_message.return_value = "任务完成"
-            with patch.object(pipeline, "_create_agent", side_effect=[MagicMock(), MagicMock(), developer, tester, reviewer]), \
+            agents = self._item_agent_set()
+            agents["code_reviewer"].send_message.return_value = "任务完成"
+            with patch.object(pipeline, "_item_agents", return_value=agents), \
                     patch("break_pipeline.human_gate", return_value=None):
                 pipeline._run_execution()
 
@@ -181,25 +319,25 @@ class BreakPipelineTests(unittest.TestCase):
             workspace.mkdir(parents=True)
             (workspace / "user_requirements.md").write_text("# R-001\n", encoding="utf-8")
             self._write_index(work_dir, [(1, "R-001", "待实施", "无", "R-001-first/user_requirements.md")])
-            developer, tester, reviewer = MagicMock(), MagicMock(), MagicMock()
-            reviewer.send_message.return_value = "任务完成"
-            with patch.object(pipeline, "_create_agent", side_effect=[MagicMock(), MagicMock(), developer, tester, reviewer]), \
+            agents = self._item_agent_set()
+            agents["code_reviewer"].send_message.return_value = "任务完成"
+            with patch.object(pipeline, "_item_agents", return_value=agents), \
                     patch("break_pipeline.human_gate", return_value=None):
                 pipeline._run_execution()
 
-            self.assertIn(str(workspace / "code_review.md"), reviewer.send_message.call_args.args[0])
+            self.assertIn(str(workspace / "code_review.md"), agents["code_reviewer"].send_message.call_args.args[0])
 
     def test_waiting_human_item_resumes_at_human_gate(self):
         with tempfile.TemporaryDirectory() as work_dir:
             pipeline = BreakPipeline(work_dir)
             self._write_requirement_files(work_dir, "R-001")
             self._write_index(work_dir, [(1, "R-001", "待人工确认", "无", "001-first.md")])
-            developer, tester, reviewer = MagicMock(), MagicMock(), MagicMock()
-            with patch.object(pipeline, "_create_agent", side_effect=[MagicMock(), MagicMock(), developer, tester, reviewer]), \
+            agents = self._item_agent_set()
+            with patch.object(pipeline, "_item_agents", return_value=agents), \
                     patch("break_pipeline.human_gate", return_value=None):
                 pipeline._run_execution()
 
-            developer.send_message.assert_not_called()
+            agents["developer"].send_message.assert_not_called()
             plan = json.loads(Path(pipeline.execution_plan_file).read_text(encoding="utf-8"))
             self.assertEqual(plan["items"][0]["status"], "已完成")
 
@@ -208,20 +346,16 @@ class BreakPipelineTests(unittest.TestCase):
             pipeline = BreakPipeline(work_dir)
             self._write_requirement_files(work_dir, "R-001")
             self._write_index(work_dir, [(1, "R-001", "待需求分析", "无", "001-first.md")])
-            analyst, requirements_reviewer = MagicMock(), MagicMock()
-            developer, tester, code_reviewer = MagicMock(), MagicMock(), MagicMock()
-            requirements_reviewer.send_message.return_value = "同意方案"
-            code_reviewer.send_message.return_value = "任务完成"
-            with patch.object(
-                pipeline,
-                "_create_agent",
-                side_effect=[analyst, requirements_reviewer, developer, tester, code_reviewer],
-            ), patch("break_pipeline.human_gate", side_effect=[None, None]):
+            agents = self._item_agent_set()
+            agents["requirements_reviewer"].send_message.return_value = "同意方案"
+            agents["code_reviewer"].send_message.return_value = "任务完成"
+            with patch.object(pipeline, "_item_agents", return_value=agents), \
+                    patch("break_pipeline.human_gate", side_effect=[None, None]):
                 pipeline._run_execution()
 
-            self.assertEqual(analyst.send_message.call_count, 1)
-            self.assertEqual(requirements_reviewer.send_message.call_count, 1)
-            self.assertEqual(developer.send_message.call_count, 1)
+            self.assertEqual(agents["analyst"].send_message.call_count, 1)
+            self.assertEqual(agents["requirements_reviewer"].send_message.call_count, 1)
+            self.assertEqual(agents["developer"].send_message.call_count, 1)
             plan = json.loads(Path(pipeline.execution_plan_file).read_text(encoding="utf-8"))
             self.assertEqual(plan["items"][0]["status"], "已完成")
 
@@ -230,38 +364,30 @@ class BreakPipelineTests(unittest.TestCase):
             pipeline = BreakPipeline(work_dir)
             self._write_requirement_files(work_dir, "R-001")
             self._write_index(work_dir, [(1, "R-001", "待需求分析", "无", "001-first.md")])
-            analyst, requirements_reviewer = MagicMock(), MagicMock()
-            developer, tester, code_reviewer = MagicMock(), MagicMock(), MagicMock()
-            requirements_reviewer.send_message.side_effect = ["补充异常场景", "同意方案"]
-            code_reviewer.send_message.return_value = "任务完成"
-            with patch.object(
-                pipeline,
-                "_create_agent",
-                side_effect=[analyst, requirements_reviewer, developer, tester, code_reviewer],
-            ), patch("break_pipeline.human_gate", side_effect=[None, None]):
+            agents = self._item_agent_set()
+            agents["requirements_reviewer"].send_message.side_effect = ["补充异常场景", "同意方案"]
+            agents["code_reviewer"].send_message.return_value = "任务完成"
+            with patch.object(pipeline, "_item_agents", return_value=agents), \
+                    patch("break_pipeline.human_gate", side_effect=[None, None]):
                 pipeline._run_execution()
 
-            self.assertEqual(analyst.send_message.call_count, 2)
-            self.assertIn("补充异常场景", analyst.send_message.call_args.args[0])
+            self.assertEqual(agents["analyst"].send_message.call_count, 2)
+            self.assertIn("补充异常场景", agents["analyst"].send_message.call_args.args[0])
 
     def test_requirement_change_from_code_review_returns_to_requirement_gates(self):
         with tempfile.TemporaryDirectory() as work_dir:
             pipeline = BreakPipeline(work_dir)
             self._write_requirement_files(work_dir, "R-001")
             self._write_index(work_dir, [(1, "R-001", "待实施", "无", "001-first.md")])
-            analyst, requirements_reviewer = MagicMock(), MagicMock()
-            developer, tester, code_reviewer = MagicMock(), MagicMock(), MagicMock()
-            requirements_reviewer.send_message.return_value = "同意方案"
-            code_reviewer.send_message.side_effect = ["需求变更: 补充失败场景", "任务完成"]
-            with patch.object(
-                pipeline,
-                "_create_agent",
-                side_effect=[analyst, requirements_reviewer, developer, tester, code_reviewer],
-            ), patch("break_pipeline.human_gate", side_effect=[None, None]):
+            agents = self._item_agent_set()
+            agents["requirements_reviewer"].send_message.return_value = "同意方案"
+            agents["code_reviewer"].send_message.side_effect = ["需求变更: 补充失败场景", "任务完成"]
+            with patch.object(pipeline, "_item_agents", return_value=agents), \
+                    patch("break_pipeline.human_gate", side_effect=[None, None]):
                 pipeline._run_execution()
 
-            self.assertEqual(analyst.send_message.call_count, 1)
-            self.assertEqual(developer.send_message.call_count, 2)
+            self.assertEqual(agents["analyst"].send_message.call_count, 1)
+            self.assertEqual(agents["developer"].send_message.call_count, 2)
 
     def test_human_feedback_retries_only_current_item(self):
         with tempfile.TemporaryDirectory() as work_dir:
@@ -271,14 +397,14 @@ class BreakPipelineTests(unittest.TestCase):
                 (1, "R-001", "待实施", "无", "001-first.md"),
                 (2, "R-002", "待实施", "R-001", "002-second.md"),
             ])
-            developer, tester, reviewer = MagicMock(), MagicMock(), MagicMock()
-            reviewer.send_message.return_value = "任务完成"
-            with patch.object(pipeline, "_create_agent", side_effect=[MagicMock(), MagicMock(), developer, tester, reviewer]), \
+            agents = self._item_agent_set()
+            agents["code_reviewer"].send_message.return_value = "任务完成"
+            with patch.object(pipeline, "_item_agents", return_value=agents), \
                     patch("break_pipeline.human_gate", side_effect=["修正 R-001", None, None]):
                 pipeline._run_execution()
 
-        self.assertEqual(developer.send_message.call_count, 3)
-        retry_prompt = developer.send_message.call_args_list[1].args[0]
+        self.assertEqual(agents["developer"].send_message.call_count, 3)
+        retry_prompt = agents["developer"].send_message.call_args_list[1].args[0]
         self.assertIn("R-001", retry_prompt)
         self.assertNotIn("R-002", retry_prompt)
 
