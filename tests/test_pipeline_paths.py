@@ -7,6 +7,14 @@ from pipeline import Pipeline
 
 
 class PipelinePathTests(unittest.TestCase):
+
+    def test_skip_human_is_forwarded_to_every_human_gate(self):
+        pipeline = Pipeline("/tmp/target", skip_human=True)
+
+        with patch("pipeline.human_gate", return_value=None) as gate:
+            pipeline._human_gate("测试", "/tmp/report.md")
+
+        gate.assert_called_once_with("测试", "/tmp/report.md", skip_human=True)
     def test_initializes_full_report_paths(self):
         pipeline = Pipeline("relative-workspace")
         work_dir = os.path.abspath("relative-workspace")

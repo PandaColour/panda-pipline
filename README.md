@@ -1,31 +1,37 @@
 # Panda Pipeline
 
-多 Agent 协作的软件开发流水线，涵盖需求分析、代码开发、测试和审查阶段。
+## 工程目标
 
-## 环境初始化
+快速验证多 Agent 流水线，执行 Codex、Claude、Cursor 三种主流智能体工具，协作完成需求分析、开发、测试、审查与记忆整理。
+
+## 环境初始化和使用
+
+确保本机已安装并登录 `codex`、`claude`、`cursor` 命令行工具，然后初始化 Python 环境：
 
 ```bash
-# 1. 创建 Python 虚拟环境
 python -m venv .venv
-
-# 2. 激活虚拟环境 (Windows)
-.venv\Scripts\activate
-
-# 3. 安装依赖
-pip install -r requirements.txt
+source .venv/bin/activate  # Windows 使用 .venv\Scripts\activate
 ```
 
-## 运行
+运行普通开发流水线：
 
 ```bash
 python main.py
 ```
 
-将大需求拆分为可独立实现、验证和人工确认的小需求，并按依赖顺序实施：
+运行大需求拆分流水线：
 
 ```bash
 python break_main.py
 ```
 
-流水线启动后会自动初始化工作目录并克隆仓库。所有角色在同一个工程根目录中运行，
-每个 Agent 通过各自的 CLI 会话 ID 保持独立对话上下文。
+如需保留所有人工审核卡点、但自动按回车通过：
+
+```bash
+python main.py --skipHuman
+python break_main.py --skipHuman
+```
+
+## 欢迎交流学习
+
+欢迎交流学习：panda.colour@qq.com

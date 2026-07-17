@@ -10,13 +10,17 @@ def normalize_human_input(value):
     return value.strip().strip(_INVISIBLE_INPUT_CHARS).strip()
 
 
-def human_gate(stage_name, review_file_path=None):
+def human_gate(stage_name, review_file_path=None, skip_human=False):
     """Request human approval or feedback before the next pipeline stage."""
     print("\n" + "=" * 50)
     print(f"🛑 【人工确认卡点】{stage_name} 阶段已完成！")
     if review_file_path and os.path.exists(review_file_path):
         print(f"📝 请前去审查该文件: {review_file_path}")
     print("=" * 50)
+
+    if skip_human:
+        print(f"⏭️  --skipHuman：阶段 {stage_name} 自动按 Enter 通过。")
+        return None
 
     while True:
         user_input = normalize_human_input(

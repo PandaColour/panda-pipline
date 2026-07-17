@@ -6,12 +6,16 @@ from workflow import human_gate
 class Pipeline:
     """Multi-agent pipeline with feedback loops and human review gates."""
 
-    def __init__(self, work_dir):
+    def __init__(self, work_dir, skip_human=False):
         self.work_dir = os.path.abspath(work_dir)
+        self.skip_human = skip_human
         self.user_requirements_file = os.path.join(self.work_dir, "user_requirements.md")
         self.develop_report_file = os.path.join(self.work_dir, "develop_report.md")
         self.test_report_file = os.path.join(self.work_dir, "test_report.md")
         self.agents = {}
+
+    def _human_gate(self, stage_name, review_file_path=None):
+        return human_gate(stage_name, review_file_path, skip_human=self.skip_human)
 
     def _create_agent(self, name, prompt_file):
         agent = Agent(
@@ -59,7 +63,7 @@ class Pipeline:
                 review_response = "同意方案"
 
             if review_response and "同意方案" in review_response[0:50]:
-                human_feedback = human_gate("1. 需求分析", self.user_requirements_file)
+                human_feedback = self._human_gate("1. 需求分析", self.user_requirements_file)
                 if human_feedback is None:
                     break
                 analyst.send_message(
@@ -117,7 +121,7 @@ class Pipeline:
                 review_response = "任务完成"
 
             if review_response and "任务完成" in review_response[0:50]:
-                human_feedback = human_gate("2. 代码开发", self.work_dir)
+                human_feedback = self._human_gate("2. 代码开发", self.work_dir)
                 if human_feedback is None:
                     break
                 developer.send_message(

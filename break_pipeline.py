@@ -29,8 +29,9 @@ class RequirementItem:
 class BreakPipeline:
     """Break a large request down, then deliver its approved items in order."""
 
-    def __init__(self, work_dir):
+    def __init__(self, work_dir, skip_human=False):
         self.work_dir = os.path.abspath(work_dir)
+        self.skip_human = skip_human
         self.requirements_dir = os.path.join(self.work_dir, "requirements")
         self.requirements_index_file = os.path.join(self.requirements_dir, "index.md")
         self.execution_plan = ExecutionPlanStore(self.requirements_dir, self.requirements_index_file)
@@ -41,6 +42,9 @@ class BreakPipeline:
         self._active_item_agents = {}
         self._pending_human_feedback = {}
         self._pending_requirement_feedback = {}
+
+    def _human_gate(self, stage_name, review_file_path=None):
+        return human_gate(stage_name, review_file_path, skip_human=self.skip_human)
 
     def _create_agent(self, name, prompt_file):
         agent = Agent(name, prompt_file, self.work_dir, add_dirs=None, agent_type="cursor", prompt_dir=self.prompt_dir)
@@ -57,7 +61,6 @@ class BreakPipeline:
                 "developer": self._create_agent(f"{prefix} 小需求开发", "item_developer.md"),
                 "tester": self._create_agent(f"{prefix} 小需求测试", "item_tester.md"),
                 "code_reviewer": self._create_agent(f"{prefix} 小需求代码审查", "item_code_reviewer.md"),
-                "memory_curator": self._create_agent(f"{prefix} 小需求记忆整理", "item_memory_curator.md"),
             }
         return self._active_item_agents[item.requirement_id]
 
@@ -91,7 +94,7 @@ class BreakPipeline:
             if not self._review_passed(review, BREAKDOWN_APPROVAL):
                 breaker.send_message(f"拆分评审意见：{review}\n请更新 {self.requirements_dir}，仅修改拆分产物。")
                 continue
-            feedback = human_gate("1. 大需求拆分", self.requirements_index_file)
+            feedback = self._human_gate("1. 大需求拆分", self.requirements_index_file)
             if feedback is None:
                 os.makedirs(self.requirements_dir, exist_ok=True)
                 with open(self.breakdown_approval_file, "w", encoding="utf-8") as approval_file:
@@ -129,7 +132,7 @@ class BreakPipeline:
                 self._validate_items(items)
                 continue
             if item.status in {"待记忆整理", "记忆整理中"}:
-                self._run_item_memory(item, item_agents["memory_curator"])
+                self._run_item_memory(item, item_agents)
                 items = self._load_items()
                 self._validate_items(items)
                 continue
@@ -172,7 +175,7 @@ class BreakPipeline:
                 self._set_status(item.requirement_id, "待需求评审")
                 continue
             self._set_status(item.requirement_id, "待需求人工确认")
-            feedback = human_gate(f"2. 小需求 {item.requirement_id} 需求分析", analysis_report)
+            feedback = self._human_gate(f"2. 小需求 {item.requirement_id} 需求分析", analysis_report)
             if feedback is None:
                 self._set_status(item.requirement_id, "待实施")
                 return
@@ -181,7 +184,7 @@ class BreakPipeline:
             self._set_status(item.requirement_id, "待需求评审")
 
     def _resume_requirements_human_gate(self, item):
-        feedback = human_gate(f"2. 小需求 {item.requirement_id} 需求分析", self._item_paths(item)["requirements_analysis"])
+        feedback = self._human_gate(f"2. 小需求 {item.requirement_id} 需求分析", self._item_paths(item)["requirements_analysis"])
         self._set_status(item.requirement_id, "待实施" if feedback is None else "需求返工中")
 
     def _run_item(self, item, developer, tester, reviewer):
@@ -218,7 +221,7 @@ class BreakPipeline:
                 developer.send_message(f"当前需求 {item.requirement_id} 的代码审查意见：{review}\n请仅修正当前项。")
                 continue
             self._set_status(item.requirement_id, "待人工确认")
-            feedback = human_gate(f"2. 小需求 {item.requirement_id}", requirement_file)
+            feedback = self._human_gate(f"2. 小需求 {item.requirement_id}", requirement_file)
             if feedback is None:
                 self._set_status(item.requirement_id, "待记忆整理")
                 return
@@ -231,7 +234,7 @@ class BreakPipeline:
 
     def _resume_human_gate(self, item):
         requirement_file = self._item_paths(item)["requirements"]
-        feedback = human_gate(f"2. 小需求 {item.requirement_id}", requirement_file)
+        feedback = self._human_gate(f"2. 小需求 {item.requirement_id}", requirement_file)
         if feedback is None:
             self._set_status(item.requirement_id, "待记忆整理")
             return
@@ -242,15 +245,25 @@ class BreakPipeline:
             self._set_status(item.requirement_id, "返工中")
             self._pending_human_feedback[item.requirement_id] = feedback
 
-    def _run_item_memory(self, item, curator):
+    def _run_item_memory(self, item, item_agents):
         paths = self._item_paths(item)
         self._set_status(item.requirement_id, "记忆整理中")
-        curator.send_message(
-            f"只整理当前需求 {item.requirement_id} 的记忆。"
-            f"读取 {paths['requirements']}、{paths['requirements_analysis']}、{paths['develop']}、{paths['test']}、{paths['code_review']}；"
-            f"将当前项记忆报告写入 {paths['memory_report']}。"
-            f"仅将已验证且可复用的信息写入 {os.path.join(self.work_dir, 'memory')}，不得修改其他需求或源码。"
+        report_paths = (
+            f"{paths['requirements']}、{paths['requirements_analysis']}、{paths['develop']}、"
+            f"{paths['test']}、{paths['code_review']}"
         )
+        for role in ("analyst", "requirements_reviewer", "tester", "code_reviewer", "developer"):
+            message = (
+                f"当前需求 {item.requirement_id} 已通过人工审核。请基于你在该需求中的对话和职责，"
+                f"阅读需要核验的正式产物：{report_paths}，只将已验证且可复用的结论沉淀到 "
+                f"{os.path.join(self.work_dir, 'memory')}。不得修改其他需求、执行计划或源码。"
+            )
+            if role == "developer":
+                message += (
+                    f"你负责最后汇总：读取上述产物及已更新的 memory/，"
+                    f"将本小需求的沉淀结果、证据来源、更新的 memory 文件、未沉淀原因和后续注意事项写入 {paths['memory_report']}。"
+                )
+            item_agents[role].send_message(message)
         self._set_status(item.requirement_id, "已完成")
         self._release_item_agents(item.requirement_id)
 
@@ -438,9 +451,9 @@ class BreakPipeline:
         )
 
     def _run_final_reflection(self):
-        breaker = self.agents.get("需求拆分记忆整理")
+        breaker = self.agents.get("需求拆分")
         if breaker is None:
-            breaker = self._create_agent("需求拆分记忆整理", "requirement_breaker.md")
+            breaker = self._create_agent("需求拆分", "requirement_breaker.md")
         items = self._load_items()
         memory_reports = [self._item_paths(item)["memory_report"] for item in items]
         breaker.send_message(
