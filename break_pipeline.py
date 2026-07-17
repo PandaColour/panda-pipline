@@ -127,7 +127,7 @@ class BreakPipeline:
         review_report = paths["requirements_review"]
         self._set_status(item.requirement_id, "待需求评审")
         analysis_message = (
-            f"只分析当前需求 {item.requirement_id}。阅读并完善 {requirement_file}，补全范围、影响、边界、异常、验收标准、依赖和风险；写 {analysis_report}。不得修改其他需求。"
+            f"只分析当前需求 {item.requirement_id}。阅读 {requirement_file}，补全范围、影响、边界、异常、验收标准、依赖和风险；将分析结果写入 {analysis_report}，不得覆盖拆分需求文件或修改其他需求。"
         )
         feedback = self._pending_requirement_feedback.pop(item.requirement_id, None)
         if feedback:
@@ -143,28 +143,29 @@ class BreakPipeline:
                 self._set_status(item.requirement_id, "待需求评审")
                 continue
             self._set_status(item.requirement_id, "待需求人工确认")
-            feedback = human_gate(f"2. 小需求 {item.requirement_id} 需求分析", requirement_file)
+            feedback = human_gate(f"2. 小需求 {item.requirement_id} 需求分析", analysis_report)
             if feedback is None:
                 self._set_status(item.requirement_id, "待实施")
                 return
             self._set_status(item.requirement_id, "需求返工中")
-            analyst.send_message(f"当前需求 {item.requirement_id} 的需求人工审核意见：{feedback}\n请仅修订当前需求文档。")
+            analyst.send_message(f"当前需求 {item.requirement_id} 的需求人工审核意见：{feedback}\n请仅修订 {analysis_report}。")
             self._set_status(item.requirement_id, "待需求评审")
 
     def _resume_requirements_human_gate(self, item):
-        feedback = human_gate(f"2. 小需求 {item.requirement_id} 需求分析", self._item_paths(item)["requirements"])
+        feedback = human_gate(f"2. 小需求 {item.requirement_id} 需求分析", self._item_paths(item)["requirements_analysis"])
         self._set_status(item.requirement_id, "待实施" if feedback is None else "需求返工中")
 
     def _run_item(self, item, developer, tester, reviewer):
         paths = self._item_paths(item)
         os.makedirs(paths["workspace"], exist_ok=True)
         requirement_file = paths["requirements"]
+        analysis_report = paths["requirements_analysis"]
         develop_report = paths["develop"]
         test_report = paths["test"]
         review_report = paths["code_review"]
         self._set_status(item.requirement_id, "开发中")
         initial_message = (
-            f"只实现当前需求 {item.requirement_id}。阅读 {requirement_file}，完成后写 {develop_report}。"
+            f"只实现当前需求 {item.requirement_id}。阅读 {requirement_file} 和 {analysis_report}，完成后写 {develop_report}。"
             "不得实现其他需求，也不要修改 requirements/index.md。"
         )
         feedback = self._pending_human_feedback.pop(item.requirement_id, None)
@@ -173,11 +174,11 @@ class BreakPipeline:
         developer.send_message(initial_message)
         while True:
             tester.send_message(
-                f"只测试当前需求 {item.requirement_id}。阅读 {requirement_file} 和 {develop_report}，"
+                f"只测试当前需求 {item.requirement_id}。阅读 {requirement_file}、{analysis_report} 和 {develop_report}，"
                 f"执行必要测试并写 {test_report}。不得实现其他需求。"
             )
             review = reviewer.send_message(
-                f"只审查当前需求 {item.requirement_id}。阅读 {requirement_file}、{develop_report}、{test_report}。"
+                f"只审查当前需求 {item.requirement_id}。阅读 {requirement_file}、{analysis_report}、{develop_report}、{test_report}。"
                 f"将审查结论写入 {review_report}。通过时最终回复第一行先输出「{ITEM_APPROVAL}」，且位于前 50 个字符内；否则给出当前项的具体修改意见。"
             )
             if self._is_requirement_change(review):
@@ -228,7 +229,7 @@ class BreakPipeline:
         return {
             "workspace": workspace,
             "requirements": requirements_file,
-            "requirements_analysis": requirements_file,
+            "requirements_analysis": os.path.join(workspace, "requirements_analysis.md"),
             "requirements_review": os.path.join(workspace, "requirement_review.md"),
             "develop": os.path.join(workspace, "develop_report.md"),
             "test": os.path.join(workspace, "test_report.md"),

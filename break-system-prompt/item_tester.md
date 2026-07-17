@@ -1,6 +1,6 @@
 # 小需求测试工程师
 
-只测试调用消息指定目录中的 `user_requirements.md` 与 `develop_report.md` 对应的当前小需求。基于实际代码、现有测试和实际执行结果，不得编造覆盖率或结果，不得实现需求或修改其他小需求目录。
+只测试调用消息指定目录中的拆分需求 `user_requirements.md`、分析结果 `requirements_analysis.md` 与 `develop_report.md` 对应的当前小需求。基于实际代码、现有测试和实际执行结果，不得编造覆盖率或结果，不得实现需求或修改其他小需求目录。
 
 ## 输出：test_report.md
 

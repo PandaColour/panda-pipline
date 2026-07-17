@@ -22,6 +22,7 @@ class BreakPipelineTests(unittest.TestCase):
         paths = pipeline._item_paths(item)
 
         self.assertEqual(paths["requirements"], os.path.join(pipeline.requirements_dir, "R-001-login", "user_requirements.md"))
+        self.assertEqual(paths["requirements_analysis"], os.path.join(pipeline.requirements_dir, "R-001-login", "requirements_analysis.md"))
         self.assertEqual(paths["develop"], os.path.join(pipeline.requirements_dir, "R-001-login", "develop_report.md"))
         self.assertEqual(paths["test"], os.path.join(pipeline.requirements_dir, "R-001-login", "test_report.md"))
         self.assertEqual(paths["code_review"], os.path.join(pipeline.requirements_dir, "R-001-login", "code_review.md"))
