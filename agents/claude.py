@@ -14,7 +14,8 @@ CLAUDE_BASE_CMD = [
     "--verbose",
 ]
 CONNECTION_CLOSED_MID_RESPONSE_ERROR = "API Error: Connection closed mid-response"
-RETRY_DELAY_SECONDS = 3
+MAX_RETRIES = 3
+RETRY_DELAY_SECONDS = 5
 
 
 def _extract_text(data, seen=None):
@@ -93,9 +94,11 @@ def parse_stream(json_line, stream_state):
 class ClaudeAgent:
     def run(self, work_dir, message, system_prompt=None, session_id=None, add_dirs=None):
         result = self._run_once(work_dir, message, system_prompt, session_id, add_dirs)
-        if result.returncode != 0 and self._is_retriable_error(result.error):
+        for _attempt in range(MAX_RETRIES):
+            if result.returncode == 0 or not self._is_retriable_error(result.error):
+                return result
             time.sleep(RETRY_DELAY_SECONDS)
-            return self._run_once(
+            result = self._run_once(
                 work_dir,
                 message,
                 system_prompt,
