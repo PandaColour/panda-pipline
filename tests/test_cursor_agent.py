@@ -1,3 +1,4 @@
+import json
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -84,6 +85,24 @@ class CursorAgentTests(unittest.TestCase):
             result = CursorAgent().run("/work/repo", "审查")
 
         self.assertTrue(result.text.startswith("同意方案"))
+
+    def test_prefers_structured_final_answer_from_assistant_over_plain_result(self):
+        final_answer = (
+            'FINAL_ANSWER\n```json\n'
+            '{"status":"approved","approval_token":"同意方案","summary":"ok","issues":[]}'
+            '\n```'
+        )
+        process = self._process(
+            json.dumps({"type": "assistant", "timestamp_ms": 1, "message": {"content": [{"type": "text", "text": final_answer}]}}),
+            json.dumps({"type": "result", "session_id": "cursor-chat", "result": "I will review the files again."}),
+        )
+
+        with patch("agents.cursor.build_cursor_base_cmd", return_value=["agent", "-p"]), \
+                patch("agents.cursor.subprocess.Popen", return_value=process):
+            result = CursorAgent().run("/work/repo", "审查")
+
+        self.assertIn("FINAL_ANSWER", result.text)
+        self.assertIn('"approval_token":"同意方案"', result.text)
 
     def test_retries_keepalive_timeout_once_after_three_seconds(self):
         timed_out_process = self._process(

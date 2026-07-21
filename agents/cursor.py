@@ -7,6 +7,7 @@ import time
 
 from ._result import AgentRunResult
 from ._cli import executable_name
+from review_decision import structured_review_decision
 
 
 CURSOR_BASE_CMD = [
@@ -44,6 +45,18 @@ def _subprocess_env():
     env = os.environ.copy()
     env["PATH"] = _extended_path()
     return env
+
+
+def _preferred_result_text(stream_state, text_parts):
+    candidates = [
+        stream_state["result_text"],
+        stream_state["last_assistant_text"],
+        "".join(text_parts),
+    ]
+    for candidate in candidates:
+        if candidate and structured_review_decision(candidate) is not None:
+            return candidate
+    return stream_state["result_text"] or stream_state["last_assistant_text"] or "".join(text_parts)
 
 
 def _message_text(message):
@@ -169,7 +182,7 @@ class CursorAgent:
                 f"Cursor exited with code {process.returncode}"
             )
             return AgentRunResult(
-                stream_state["result_text"] or stream_state["last_assistant_text"] or "".join(text_parts), stream_state["session_id"],
+                _preferred_result_text(stream_state, text_parts), stream_state["session_id"],
                 process.returncode, error,
             )
         except Exception as error:

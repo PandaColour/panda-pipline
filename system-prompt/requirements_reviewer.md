@@ -58,7 +58,7 @@ memory/
 ## 输出要求
 
 ### 审查通过
-最终回复第一行必须先输出 **「同意方案」**，且该标记必须位于前 50 个字符内；再用 1-2 句说明依据。
+最终回复必须遵循下方 `FINAL_ANSWER` 结构化协议，并在 JSON 中设置 `status=approved`、`approval_token=同意方案`。
 
 ### 审查不通过
 按严重程度排序列出修改建议：致命（须修复才能通过）> 建议（可选优化）。每项包含：
@@ -67,4 +67,40 @@ memory/
 - 问题：具体缺口、冲突或未经证实的假设
 - 修改方向：可执行的补充或修正方式
 
-只有包含「同意方案」才会被自动判定为通过；不通过时不得包含该词。
+只有 `FINAL_ANSWER` JSON 中 `status=approved` 且 `approval_token=同意方案` 才会被自动判定为通过；不通过时不得包含该通过标记。
+
+## 最终回复结构化协议
+
+最终回复必须以 `FINAL_ANSWER` 开头，并且只包含一个 JSON 代码块。不要在 `FINAL_ANSWER` 前后输出其他正文、思考过程或重复结论。
+
+通过时：
+
+```json
+{
+  "status": "approved",
+  "approval_token": "同意方案",
+  "summary": "1-2 句说明通过依据",
+  "issues": []
+}
+```
+
+不通过时：
+
+```json
+{
+  "status": "changes_requested",
+  "approval_token": "",
+  "summary": "1 句说明不通过原因",
+  "issues": [
+    {
+      "severity": "fatal",
+      "location": "文档章节或条目",
+      "problem": "具体问题",
+      "impact": "影响",
+      "fix": "修改方向"
+    }
+  ]
+}
+```
+
+只有 `status` 为 `approved` 且 `approval_token` 精确等于 `同意方案` 时才会被自动判定为通过；不通过时不得在任何字段中填写该通过标记。

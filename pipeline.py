@@ -1,5 +1,6 @@
 import os
 from agents import Agent
+from review_decision import review_passed
 from workflow import human_gate
 
 
@@ -54,7 +55,7 @@ class Pipeline:
 
         review_response = reviewer.send_message(
             f"请审查 {self.user_requirements_file} 文件中的需求分析，原始需求: {user_idea}"
-            f"评估其完整性、一致性和可行性。如果满意，最终回复第一行先输出「同意方案」，且位于前 50 个字符内。"
+            f"评估其完整性、一致性和可行性。如果满意，最终回复按 FINAL_ANSWER JSON 协议输出 status=approved 且 approval_token=同意方案。"
             f"如果不满意，请提供具体的修改建议。"
         )
 
@@ -62,7 +63,7 @@ class Pipeline:
             if review_response is None or review_response == "":
                 review_response = "同意方案"
 
-            if review_response and "同意方案" in review_response[0:50]:
+            if review_passed(review_response, "同意方案"):
                 human_feedback = self._human_gate("1. 需求分析", self.user_requirements_file)
                 if human_feedback is None:
                     break
@@ -78,7 +79,7 @@ class Pipeline:
 
             review_response = reviewer.send_message(
                 f"请继续审查 {self.user_requirements_file} 文件中的需求分析,分析agent对它进行了一些修改"
-                f"评估其完整性、一致性和可行性。如果满意，最终回复第一行先输出「同意方案」，且位于前 50 个字符内。"
+                f"评估其完整性、一致性和可行性。如果满意，最终回复按 FINAL_ANSWER JSON 协议输出 status=approved 且 approval_token=同意方案。"
                 f"如果不满意，请提供具体的修改建议。"
             )
 
@@ -113,14 +114,14 @@ class Pipeline:
                 f"{self.develop_report_file} 和 "
                 f"{self.test_report_file}，"
                 f"然后审查 {self.work_dir} 下的代码和 {self.work_dir} 下的测试。"
-                f"如果所有检查通过，最终回复第一行先输出「任务完成」，且位于前 50 个字符内。"
+                f"如果所有检查通过，最终回复按 FINAL_ANSWER JSON 协议输出 status=approved 且 approval_token=任务完成。"
                 f"否则请提供具体的修改建议。"
             )
 
             if review_response is None or review_response == "":
                 review_response = "任务完成"
 
-            if review_response and "任务完成" in review_response[0:50]:
+            if review_passed(review_response, "任务完成"):
                 human_feedback = self._human_gate("2. 代码开发", self.work_dir)
                 if human_feedback is None:
                     break

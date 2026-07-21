@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 from agents import Agent
 from execution_plan import ExecutionPlanStore
+from review_decision import review_passed, structured_review_decision
 from workflow import human_gate
 
 
@@ -89,7 +90,7 @@ class BreakPipeline:
         while True:
             review = reviewer.send_message(
                 f"请审查拆分产物 {self.requirements_index_file} 及目录 {self.requirements_dir}，原始需求：{user_idea}。"
-                f"通过时最终回复第一行先输出「{BREAKDOWN_APPROVAL}」，且位于前 50 个字符内；否则给出可执行修改意见。"
+                f"通过时在 FINAL_ANSWER JSON 中输出 status=approved 且 approval_token={BREAKDOWN_APPROVAL}；否则输出 changes_requested 和可执行修改意见。"
             )
             if not self._review_passed(review, BREAKDOWN_APPROVAL):
                 breaker.send_message(f"拆分评审意见：{review}\n请更新 {self.requirements_dir}，仅修改拆分产物。")
@@ -167,7 +168,7 @@ class BreakPipeline:
         analyst.send_message(analysis_message)
         while True:
             review = reviewer.send_message(
-                f"只评审当前需求 {item.requirement_id}。阅读 {requirement_file} 和 {analysis_report}，将结论写入 {review_report}。通过时最终回复第一行先输出「{REQUIREMENTS_APPROVAL}」，且位于前 50 个字符内；否则给出具体修改意见。"
+                f"只评审当前需求 {item.requirement_id}。阅读 {requirement_file} 和 {analysis_report}，将结论写入 {review_report}。通过时在 FINAL_ANSWER JSON 中输出 status=approved 且 approval_token={REQUIREMENTS_APPROVAL}；否则输出 changes_requested 和具体修改意见。"
             )
             if not self._review_passed(review, REQUIREMENTS_APPROVAL):
                 self._set_status(item.requirement_id, "需求返工中")
@@ -211,7 +212,7 @@ class BreakPipeline:
             )
             review = reviewer.send_message(
                 f"只审查当前需求 {item.requirement_id}。阅读 {requirement_file}、{analysis_report}、{develop_report}、{test_report}。"
-                f"将审查结论写入 {review_report}。通过时最终回复第一行先输出「{ITEM_APPROVAL}」，且位于前 50 个字符内；否则给出当前项的具体修改意见。"
+                f"将审查结论写入 {review_report}。通过时在 FINAL_ANSWER JSON 中输出 status=approved 且 approval_token={ITEM_APPROVAL}；否则输出 changes_requested 和当前项的具体修改意见。"
             )
             if self._is_requirement_change(review):
                 self._set_status(item.requirement_id, "待需求分析")
@@ -269,13 +270,16 @@ class BreakPipeline:
 
     @staticmethod
     def _is_requirement_change(feedback):
-        return isinstance(feedback, str) and feedback.strip().startswith("需求变更:")
+        if not isinstance(feedback, str):
+            return False
+        decision = structured_review_decision(feedback)
+        if decision is not None:
+            return decision.get("status") == "requirement_change"
+        return feedback.strip().startswith("需求变更:")
 
     @staticmethod
     def _review_passed(review_response, approval_token):
-        if review_response is None or not str(review_response).strip():
-            return True
-        return approval_token in str(review_response)[:50]
+        return review_passed(review_response, approval_token)
 
     def _item_paths(self, item):
         requirements_file = os.path.abspath(os.path.join(self.requirements_dir, item.filename))

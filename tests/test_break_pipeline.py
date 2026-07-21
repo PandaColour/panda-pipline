@@ -202,9 +202,39 @@ class BreakPipelineTests(unittest.TestCase):
 
         gate.assert_called_once()
 
-    def test_review_approval_uses_first_fifty_characters(self):
+    def test_review_approval_supports_structured_final_answer(self):
+        response = (
+            "I'll re-read the files first.\n"
+            "FINAL_ANSWER\n"
+            "```json\n"
+            '{"status":"approved","approval_token":"拆分方案通过","summary":"ok","issues":[]}\n'
+            "```"
+        )
+
+        self.assertTrue(BreakPipeline._review_passed(response, "拆分方案通过"))
+
+    def test_review_rejection_json_wins_over_legacy_token_text(self):
+        response = (
+            "FINAL_ANSWER\n"
+            "```json\n"
+            '{"status":"changes_requested","approval_token":"","summary":"不要判成拆分方案通过","issues":[]}\n'
+            "```"
+        )
+
+        self.assertFalse(BreakPipeline._review_passed(response, "拆分方案通过"))
+
+    def test_review_approval_keeps_legacy_token_compatibility(self):
         self.assertTrue(BreakPipeline._review_passed("提示：请继续。拆分方案通过", "拆分方案通过"))
-        self.assertFalse(BreakPipeline._review_passed("x" * 51 + "拆分方案通过", "拆分方案通过"))
+
+    def test_requirement_change_supports_structured_final_answer(self):
+        response = (
+            "FINAL_ANSWER\n"
+            "```json\n"
+            '{"status":"requirement_change","approval_token":"","summary":"需求变更: 补充失败场景","issues":[]}\n'
+            "```"
+        )
+
+        self.assertTrue(BreakPipeline._is_requirement_change(response))
 
     def test_unknown_dependency_stops_before_development(self):
         with tempfile.TemporaryDirectory() as work_dir:
