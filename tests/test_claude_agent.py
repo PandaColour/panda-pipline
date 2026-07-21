@@ -66,6 +66,27 @@ class ClaudeAgentTests(unittest.TestCase):
 
         self.assertTrue(result.startswith("同意方案"))
 
+    def test_retries_connection_closed_mid_response_once(self):
+        failed_process = self._process(
+            '{"type":"system","subtype":"init","session_id":"claude-session"}',
+            "API Error: Connection closed mid-response. The response above may be incomplete.",
+            returncode=1,
+        )
+        successful_process = self._process(
+            '{"type":"result","subtype":"success","session_id":"claude-session","result":"retried successfully"}',
+        )
+
+        with patch("agents.claude.subprocess.Popen", side_effect=[failed_process, successful_process]) as popen, \
+                patch("agents.claude.time.sleep") as sleep:
+            result = Agent("claude", "prompt.md", "/work/repo", agent_type="claude").send_message("继续")
+
+        self.assertEqual(result, "retried successfully")
+        self.assertEqual(popen.call_count, 2)
+        second_cmd = popen.call_args_list[1].args[0]
+        self.assertIn("--resume", second_cmd)
+        self.assertEqual(second_cmd[second_cmd.index("--resume") + 1], "claude-session")
+        sleep.assert_called_once_with(3)
+
 
 if __name__ == "__main__":
     unittest.main()

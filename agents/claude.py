@@ -1,6 +1,7 @@
 import json
 import subprocess
 import sys
+import time
 
 from ._result import AgentRunResult
 from ._cli import executable_name
@@ -12,6 +13,8 @@ CLAUDE_BASE_CMD = [
     "--output-format=stream-json",
     "--verbose",
 ]
+CONNECTION_CLOSED_MID_RESPONSE_ERROR = "API Error: Connection closed mid-response"
+RETRY_DELAY_SECONDS = 3
 
 
 def _extract_text(data, seen=None):
@@ -89,6 +92,23 @@ def parse_stream(json_line, stream_state):
 
 class ClaudeAgent:
     def run(self, work_dir, message, system_prompt=None, session_id=None, add_dirs=None):
+        result = self._run_once(work_dir, message, system_prompt, session_id, add_dirs)
+        if result.returncode != 0 and self._is_retriable_error(result.error):
+            time.sleep(RETRY_DELAY_SECONDS)
+            return self._run_once(
+                work_dir,
+                message,
+                system_prompt,
+                result.session_id or session_id,
+                add_dirs,
+            )
+        return result
+
+    @staticmethod
+    def _is_retriable_error(error):
+        return CONNECTION_CLOSED_MID_RESPONSE_ERROR in (error or "")
+
+    def _run_once(self, work_dir, message, system_prompt=None, session_id=None, add_dirs=None):
         cmd = CLAUDE_BASE_CMD.copy()
         if session_id:
             cmd.extend(["--resume", session_id])
@@ -106,17 +126,21 @@ class ClaudeAgent:
             process.stdin.write(message)
             process.stdin.close()
             text_parts = []
+            raw_output_parts = []
             stream_state = {"session_id": session_id, "final_text": None}
             while True:
                 line = process.stdout.readline()
                 if not line and process.poll() is not None:
                     break
                 if line:
+                    raw_output_parts.append(line)
                     text = parse_stream(line, stream_state)
                     if text:
                         text_parts.append(text)
             process.wait()
-            error = None if process.returncode == 0 else f"Claude exited with code {process.returncode}"
+            error = None if process.returncode == 0 else "".join(raw_output_parts).strip() or (
+                f"Claude exited with code {process.returncode}"
+            )
             return AgentRunResult(
                 stream_state["final_text"] or "".join(text_parts),
                 stream_state["session_id"],
