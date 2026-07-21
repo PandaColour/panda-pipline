@@ -142,6 +142,36 @@ class CursorAgentTests(unittest.TestCase):
         self.assertEqual(popen.call_count, 2)
         sleep.assert_called_once_with(3)
 
+    def test_retries_writable_iterable_closed_after_resumed_keepalive_failure(self):
+        keepalive_process = self._process(
+            '{"type":"system","subtype":"init","session_id":"cursor-chat","model":"auto"}',
+            "RetriableError: [internal] HTTP/2 keepalive ping timed out after 5000ms",
+            returncode=1,
+        )
+        writable_iterable_process = self._process(
+            "RetriableError: WritableIterable is closed",
+            returncode=1,
+        )
+        successful_process = self._process(
+            '{"type":"result","session_id":"cursor-chat","result":"retried successfully"}',
+        )
+
+        with patch("agents.cursor.build_cursor_base_cmd", return_value=["agent", "-p"]), \
+                patch(
+                    "agents.cursor.subprocess.Popen",
+                    side_effect=[keepalive_process, writable_iterable_process, successful_process],
+                ) as popen, \
+                patch("agents.cursor.time.sleep") as sleep:
+            result = CursorAgent().run("/work/repo", "Retry this task")
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.text, "retried successfully")
+        self.assertEqual(popen.call_count, 3)
+        resumed_cmd = popen.call_args_list[1].args[0]
+        self.assertIn("--resume", resumed_cmd)
+        self.assertEqual(resumed_cmd[resumed_cmd.index("--resume") + 1], "cursor-chat")
+        self.assertEqual(sleep.call_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()
