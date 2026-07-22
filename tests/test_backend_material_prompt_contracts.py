@@ -61,6 +61,15 @@ class BackendMaterialPromptContractTests(unittest.TestCase):
             self.assertIn("优先检索仓库既有接口封装、服务调用、API 客户端、路由和配置", content, prompt_file.name)
             self.assertIn("不得直接判定为无接口或自行 mock", content, prompt_file.name)
 
+    def test_developer_prompts_require_disclosure_for_requirement_gaps(self):
+        for prompt_file in DEVELOPER_PROMPTS:
+            content = prompt_file.read_text(encoding="utf-8")
+            self.assertIn("需求部分内容缺失", content, prompt_file.name)
+            self.assertIn("无法完成的需求点", content, prompt_file.name)
+            self.assertIn("缺少的信息", content, prompt_file.name)
+            self.assertIn("当前临时方案/位置/范围", content, prompt_file.name)
+            self.assertIn("TODO：请人类使用者尽快补充缺失需求信息并完善代码", content, prompt_file.name)
+
     def test_developer_prompts_allow_self_testing(self):
         for prompt_file in DEVELOPER_PROMPTS:
             content = prompt_file.read_text(encoding="utf-8")
@@ -85,6 +94,15 @@ class BackendMaterialPromptContractTests(unittest.TestCase):
             self.assertIn("复用已有代码", content, prompt_file.name)
             self.assertIn("对其他功能的影响最小", content, prompt_file.name)
             self.assertIn("不满足上述要求", content, prompt_file.name)
+            self.assertIn("要求开发 Agent 修改", content, prompt_file.name)
+
+    def test_code_review_prompts_allow_well_disclosed_requirement_gaps(self):
+        for prompt_file in CODE_REVIEW_PROMPTS:
+            content = prompt_file.read_text(encoding="utf-8")
+            self.assertIn("需求部分内容缺失导致部分需求点无法完成", content, prompt_file.name)
+            self.assertIn("不得仅因这些已披露的未完成项不通过", content, prompt_file.name)
+            self.assertIn("无法完成的需求点、缺少的信息、当前临时方案/位置/范围、影响和 TODO", content, prompt_file.name)
+            self.assertIn("缺少上述披露", content, prompt_file.name)
             self.assertIn("要求开发 Agent 修改", content, prompt_file.name)
 
     def test_code_review_prompts_take_over_test_report_output(self):
