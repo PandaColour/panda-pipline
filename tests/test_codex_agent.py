@@ -29,6 +29,8 @@ class CodexAgentTests(unittest.TestCase):
         cmd = popen.call_args.args[0]
         self.assertNotIn("resume", cmd)
         self.assertNotIn("--last", cmd)
+        self.assertNotIn("--sandbox", cmd)
+        self.assertIn('sandbox_mode="danger-full-access"', cmd)
         self.assertEqual(cmd[-1], "-")
         self.assertEqual(popen.call_args.kwargs["stdin"], subprocess.PIPE)
         process.stdin.write.assert_called_once_with(
@@ -60,6 +62,8 @@ class CodexAgentTests(unittest.TestCase):
         self.assertEqual(popen.call_args.kwargs["cwd"], "/work/repo")
         self.assertNotIn("-C", cmd)
         self.assertNotIn("--last", cmd)
+        self.assertNotIn("--sandbox", cmd)
+        self.assertIn('sandbox_mode="danger-full-access"', cmd)
         self.assertEqual(popen.call_args.kwargs["stdin"], subprocess.PIPE)
         process.stdin.write.assert_called_once_with("Continue task")
         process.stdin.close.assert_called_once()

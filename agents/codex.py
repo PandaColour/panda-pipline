@@ -10,7 +10,7 @@ from ._cli import executable_name
 CODEX_BASE_CMD = [
     executable_name("codex"), "exec",
     "-c", "shell_environment_policy.inherit=all",
-    "--sandbox", "danger-full-access",
+    "-c", 'sandbox_mode="danger-full-access"',
     "--json",
 ]
 MAX_RETRIES = 3
