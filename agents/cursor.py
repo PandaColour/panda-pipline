@@ -14,11 +14,8 @@ CURSOR_BASE_CMD = [
     executable_name("agent"), "-p", "--force", "--output-format", "stream-json", "--stream-partial-output",
 ]
 _CLI_SEARCH_DIRS = [os.path.expanduser("~/.local/bin"), "/usr/local/bin", "/opt/homebrew/bin"]
-KEEPALIVE_TIMEOUT_ERROR = "RetriableError: [internal] HTTP/2 keepalive ping timed out after 5000ms"
-TLS_CONNECTION_DISCONNECTED_ERROR = "Error: [aborted] Client network socket disconnected before secure TLS connection was established"
-WRITABLE_ITERABLE_CLOSED_ERROR = "RetriableError: WritableIterable is closed"
-KEEPALIVE_RETRY_DELAY_SECONDS = 3
-CURSOR_RETRIABLE_NETWORK_ATTEMPTS = 3
+MAX_RETRIES = 3
+RETRY_DELAY_SECONDS = 5
 
 
 def _extended_path():
@@ -120,26 +117,14 @@ def parse_stream(json_line, stream_state):
 class CursorAgent:
     def run(self, work_dir, message, system_prompt=None, session_id=None, add_dirs=None):
         current_session_id = session_id
-        for attempt in range(CURSOR_RETRIABLE_NETWORK_ATTEMPTS):
-            result = self._run_once(work_dir, message, system_prompt, current_session_id, add_dirs)
+        result = self._run_once(work_dir, message, system_prompt, current_session_id, add_dirs)
+        for _attempt in range(MAX_RETRIES):
             current_session_id = result.session_id or current_session_id
-            if result.returncode == 0 or not self._is_retriable_network_error(result.error):
+            if result.returncode == 0:
                 return result
-            if attempt == CURSOR_RETRIABLE_NETWORK_ATTEMPTS - 1:
-                return result
-            time.sleep(KEEPALIVE_RETRY_DELAY_SECONDS)
+            time.sleep(RETRY_DELAY_SECONDS)
+            result = self._run_once(work_dir, message, system_prompt, current_session_id, add_dirs)
         return result
-
-    @staticmethod
-    def _is_retriable_network_error(error):
-        return any(
-            retry_error in (error or "")
-            for retry_error in (
-                KEEPALIVE_TIMEOUT_ERROR,
-                TLS_CONNECTION_DISCONNECTED_ERROR,
-                WRITABLE_ITERABLE_CLOSED_ERROR,
-            )
-        )
 
     def _run_once(self, work_dir, message, system_prompt, session_id, add_dirs):
         try:

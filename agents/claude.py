@@ -13,7 +13,6 @@ CLAUDE_BASE_CMD = [
     "--output-format=stream-json",
     "--verbose",
 ]
-CONNECTION_CLOSED_MID_RESPONSE_ERROR = "API Error: Connection closed mid-response"
 MAX_RETRIES = 3
 RETRY_DELAY_SECONDS = 5
 
@@ -95,7 +94,7 @@ class ClaudeAgent:
     def run(self, work_dir, message, system_prompt=None, session_id=None, add_dirs=None):
         result = self._run_once(work_dir, message, system_prompt, session_id, add_dirs)
         for _attempt in range(MAX_RETRIES):
-            if result.returncode == 0 or not self._is_retriable_error(result.error):
+            if result.returncode == 0:
                 return result
             time.sleep(RETRY_DELAY_SECONDS)
             result = self._run_once(
@@ -106,10 +105,6 @@ class ClaudeAgent:
                 add_dirs,
             )
         return result
-
-    @staticmethod
-    def _is_retriable_error(error):
-        return CONNECTION_CLOSED_MID_RESPONSE_ERROR in (error or "")
 
     def _run_once(self, work_dir, message, system_prompt=None, session_id=None, add_dirs=None):
         cmd = CLAUDE_BASE_CMD.copy()
