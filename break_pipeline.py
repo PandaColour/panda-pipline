@@ -320,7 +320,10 @@ class BreakPipeline:
     def _load_items(self):
         self._ensure_execution_plan()
         plan = self.execution_plan.read()
+        statuses_changed = self.execution_plan.normalize_statuses(plan, VALID_STATUSES)
         self.execution_plan.validate(plan, VALID_STATUSES, self.execution_plan.index_hash())
+        if statuses_changed:
+            self.execution_plan.write(plan)
         items = [
             RequirementItem(
                 raw_item["order"], raw_item["id"], raw_item["name"], raw_item["status"],
@@ -349,14 +352,17 @@ class BreakPipeline:
             if isinstance(normalizer_response, str) and normalizer_response.strip():
                 raise ValueError(f"执行索引规范化未生成计划：{normalizer_response.strip()}") from error
             raise
+        statuses_changed = self.execution_plan.normalize_statuses(plan, VALID_STATUSES)
         self.execution_plan.validate(plan, VALID_STATUSES, expected_source_hash=source_hash)
         self._validate_items_from_plan(plan)
-        if previous_plan is not None and self._preserve_unchanged_statuses(previous_plan, plan):
+        preserve_changed = previous_plan is not None and self._preserve_unchanged_statuses(previous_plan, plan)
+        if statuses_changed or preserve_changed:
             self.execution_plan.write(plan)
 
     def _valid_previous_plan(self):
         try:
             plan = self.execution_plan.read()
+            self.execution_plan.normalize_statuses(plan, VALID_STATUSES)
             self.execution_plan.validate(plan, VALID_STATUSES)
             self._validate_items_from_plan(plan)
         except ValueError:

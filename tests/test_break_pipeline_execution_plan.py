@@ -57,6 +57,16 @@ class BreakExecutionPlanTests(unittest.TestCase):
 
         self.assertEqual([item.requirement_id for item in items], ["R-001"])
 
+    def test_load_items_normalizes_blocking_synonym_status(self):
+        self._write_plan(self._plan(status="阻断（待外部契约）"))
+
+        with patch.object(self.pipeline, "_create_agent", side_effect=AssertionError("normalizer should not run")):
+            items = self.pipeline._load_items()
+
+        self.assertEqual(items[0].status, "阻塞")
+        saved_plan = json.loads(Path(self.pipeline.execution_plan_file).read_text(encoding="utf-8"))
+        self.assertEqual(saved_plan["items"][0]["status"], "阻塞")
+
     def test_set_status_changes_json_without_modifying_markdown_index(self):
         self._write_plan(self._plan())
         original_index = self.index_file.read_bytes()

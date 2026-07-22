@@ -4,6 +4,9 @@ import hashlib
 import json
 import os
 
+BLOCKED_STATUS = "阻塞"
+BLOCKING_STATUS_MARKERS = ("阻塞", "阻断")
+
 
 class ExecutionPlanStore:
     """Validate and persist the generated JSON projection of requirements/index.md."""
@@ -22,7 +25,11 @@ class ExecutionPlanStore:
 
     def is_current(self, valid_statuses):
         try:
-            self.validate(self.read(), valid_statuses, self.index_hash())
+            plan = self.read()
+            changed = self.normalize_statuses(plan, valid_statuses)
+            self.validate(plan, valid_statuses, self.index_hash())
+            if changed:
+                self.write(plan)
         except ValueError:
             return False
         return True
@@ -45,9 +52,11 @@ class ExecutionPlanStore:
         os.replace(temporary_file, self.plan_file)
 
     def set_status(self, requirement_id, status, valid_statuses, expected_source_hash=None):
+        status = self.normalize_status(status, valid_statuses)
         if status not in valid_statuses:
             raise ValueError(f"未知需求状态: {status}")
         plan = self.read()
+        self.normalize_statuses(plan, valid_statuses)
         self.validate(plan, valid_statuses, expected_source_hash)
         for item in plan["items"]:
             if item["id"] == requirement_id:
@@ -55,6 +64,31 @@ class ExecutionPlanStore:
                 self.write(plan)
                 return
         raise ValueError(f"找不到需求 ID: {requirement_id}")
+
+    @staticmethod
+    def normalize_status(status, valid_statuses):
+        if not isinstance(status, str):
+            return status
+        normalized = status.strip()
+        if normalized in valid_statuses:
+            return normalized
+        if BLOCKED_STATUS in valid_statuses and any(marker in normalized for marker in BLOCKING_STATUS_MARKERS):
+            return BLOCKED_STATUS
+        return normalized
+
+    @staticmethod
+    def normalize_statuses(plan, valid_statuses):
+        if not isinstance(plan, dict) or not isinstance(plan.get("items"), list):
+            return False
+        changed = False
+        for item in plan["items"]:
+            if not isinstance(item, dict) or "status" not in item:
+                continue
+            normalized = ExecutionPlanStore.normalize_status(item["status"], valid_statuses)
+            if normalized != item["status"]:
+                item["status"] = normalized
+                changed = True
+        return changed
 
     @staticmethod
     def validate(plan, valid_statuses, expected_source_hash=None):
@@ -84,6 +118,9 @@ class ExecutionPlanStore:
             for field, field_type in required_fields.items():
                 if field not in item or type(item[field]) is not field_type:
                     raise ValueError(f"执行计划条目字段无效: {field}")
+            normalized_status = ExecutionPlanStore.normalize_status(item["status"], valid_statuses)
+            if normalized_status != item["status"]:
+                item["status"] = normalized_status
             if item["order"] < 1 or not item["id"].strip() or not item["name"].strip():
                 raise ValueError("执行计划条目缺少有效的顺序、ID 或名称。")
             if item["status"] not in valid_statuses:

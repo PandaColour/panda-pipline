@@ -56,6 +56,8 @@ class FigmaAssetPromptTests(unittest.TestCase):
         self.assertIn("验收标准", content)
         self.assertIn("拓扑", content)
         self.assertIn("待需求分析（阻塞）", content)
+        self.assertIn("阻断（待外部契约）", content)
+        self.assertIn("归一为 `阻塞`", content)
         self.assertIn("只能输出", content)
 
 
