@@ -140,6 +140,35 @@ class PipelinePathTests(unittest.TestCase):
             self.assertIn("仍缺少验收", analyst.send_message.call_args_list[2].args[0])
             gate.assert_called_once_with("1. 需求分析", pipeline.user_requirements_file, skip_human=False)
 
+    def test_final_reflection_only_asks_fact_producers_to_curate_memory(self):
+        with tempfile.TemporaryDirectory() as work_dir:
+            pipeline = Pipeline(work_dir)
+            analyst = MagicMock()
+            requirements_reviewer = MagicMock()
+            developer = MagicMock()
+            code_reviewer = MagicMock()
+            pipeline.agents = {
+                "需求分析": analyst,
+                "需求审查": requirements_reviewer,
+                "代码开发": developer,
+                "代码验证审查": code_reviewer,
+            }
+
+            pipeline._run_final_reflection()
+
+            analyst.send_message.assert_called_once()
+            developer.send_message.assert_called_once()
+            requirements_reviewer.send_message.assert_not_called()
+            code_reviewer.send_message.assert_not_called()
+
+            analyst_prompt = analyst.send_message.call_args.args[0]
+            developer_prompt = developer.send_message.call_args.args[0]
+            self.assertIn("memory/", analyst_prompt)
+            self.assertIn("需求侧事实", analyst_prompt)
+            self.assertIn("实现侧事实", developer_prompt)
+            self.assertIn(pipeline.user_requirements_file, analyst_prompt)
+            self.assertIn(pipeline.develop_report_file, developer_prompt)
+
 
 if __name__ == "__main__":
     unittest.main()

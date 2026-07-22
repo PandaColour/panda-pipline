@@ -104,9 +104,10 @@ class BreakPipelineTests(unittest.TestCase):
                 pipeline._run_execution()
 
             self.assertEqual(agents["analyst"].send_message.call_count, 1)
-            self.assertEqual(agents["requirements_reviewer"].send_message.call_count, 1)
+            agents["requirements_reviewer"].send_message.assert_not_called()
             self.assertEqual(agents["developer"].send_message.call_count, 2)
-            self.assertEqual(agents["code_reviewer"].send_message.call_count, 2)
+            self.assertEqual(agents["code_reviewer"].send_message.call_count, 1)
+            self.assertIn("需求侧事实", agents["analyst"].send_message.call_args.args[0])
             self.assertIn("memory_report.md", agents["developer"].send_message.call_args.args[0])
             plan = json.loads(Path(pipeline.execution_plan_file).read_text(encoding="utf-8"))
             self.assertEqual(plan["items"][0]["status"], "已完成")
@@ -121,8 +122,10 @@ class BreakPipelineTests(unittest.TestCase):
             with patch.object(pipeline, "_item_agents", return_value=agents):
                 pipeline._run_execution()
 
-            for agent in agents.values():
-                agent.send_message.assert_called_once()
+            agents["analyst"].send_message.assert_called_once()
+            agents["developer"].send_message.assert_called_once()
+            agents["requirements_reviewer"].send_message.assert_not_called()
+            agents["code_reviewer"].send_message.assert_not_called()
 
     def test_final_reflection_only_calls_breakdown_agent(self):
         with tempfile.TemporaryDirectory() as work_dir:
@@ -441,7 +444,7 @@ class BreakPipelineTests(unittest.TestCase):
                 pipeline._run_execution()
 
             self.assertEqual(agents["analyst"].send_message.call_count, 2)
-            self.assertEqual(agents["requirements_reviewer"].send_message.call_count, 2)
+            self.assertEqual(agents["requirements_reviewer"].send_message.call_count, 1)
             self.assertEqual(agents["developer"].send_message.call_count, 2)
             plan = json.loads(Path(pipeline.execution_plan_file).read_text(encoding="utf-8"))
             self.assertEqual(plan["items"][0]["status"], "已完成")

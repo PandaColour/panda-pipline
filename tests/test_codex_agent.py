@@ -3,6 +3,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from agents import Agent
+from agents.codex import CODEX_BASE_CMD
 
 
 class CodexAgentTests(unittest.TestCase):
@@ -49,9 +50,12 @@ class CodexAgentTests(unittest.TestCase):
             result = agent.send_message("Continue task")
 
         cmd = popen.call_args.args[0]
+        expected_cmd = CODEX_BASE_CMD.copy()
+        expected_cmd.insert(2, "resume")
+        expected_cmd.extend(["codex-thread", "-"])
         self.assertEqual(
             cmd,
-            ["codex", "exec", "resume", "--json", "codex-thread", "-"],
+            expected_cmd,
         )
         self.assertEqual(popen.call_args.kwargs["cwd"], "/work/repo")
         self.assertNotIn("-C", cmd)

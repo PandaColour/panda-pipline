@@ -271,20 +271,26 @@ class BreakPipeline:
         paths = self._item_paths(item)
         self._set_status(item.requirement_id, "记忆整理中")
         report_paths = (
-            f"{paths['requirements']}、{paths['requirements_analysis']}、{paths['develop']}、"
-            f"{paths['test']}、{paths['code_review']}"
+            f"{paths['requirements']}、{paths['requirements_analysis']}、{paths['requirements_review']}、"
+            f"{paths['develop']}、{paths['test']}、{paths['code_review']}"
         )
-        for role in ("analyst", "requirements_reviewer", "code_reviewer", "developer"):
-            message = (
-                f"当前需求 {item.requirement_id} 已通过人工审核。请基于你在该需求中的对话和职责，"
-                f"阅读需要核验的正式产物：{report_paths}，只将已验证且可复用的结论沉淀到 "
-                f"{os.path.join(self.work_dir, 'memory')}。不得修改其他需求、执行计划或源码。"
-            )
-            if role == "developer":
-                message += (
-                    f"你负责最后汇总：读取上述产物及已更新的 memory/，"
-                    f"将本小需求的沉淀结果、证据来源、更新的 memory 文件、未沉淀原因和后续注意事项写入 {paths['memory_report']}。"
-                )
+        memory_dir = os.path.join(self.work_dir, "memory") + os.sep
+        curation_messages = {
+            "analyst": (
+                f"当前需求 {item.requirement_id} 已通过人工审核，收到记忆整理指令。"
+                f"请读取需要核验的正式产物：{report_paths}，只将需求侧事实沉淀到 {memory_dir}："
+                "业务规则、状态流转、场景流程、接口约束、UI/Figma 约束、验收规则和待确认边界。"
+                "需求评审和代码审查报告只作为证据输入；不得修改其他需求、执行计划或源码。"
+            ),
+            "developer": (
+                f"当前需求 {item.requirement_id} 已通过人工审核，收到记忆整理指令。"
+                f"请读取需要核验的正式产物：{report_paths}、当前代码及已更新的 memory/，"
+                f"只将实现侧事实沉淀到 {memory_dir}：真实代码路径、接口封装、认证方式、复用方式、模块边界、实现坑点和禁止做法。"
+                f"需求评审和代码审查报告只作为证据输入；不得修改其他需求、执行计划或源码。"
+                f"最后将本小需求的沉淀结果、证据来源、更新的 memory 文件、未沉淀原因和后续注意事项写入 {paths['memory_report']}。"
+            ),
+        }
+        for role, message in curation_messages.items():
             item_agents[role].send_message(message)
         self._set_status(item.requirement_id, "已完成")
         self._release_item_agents(item.requirement_id)

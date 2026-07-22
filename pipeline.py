@@ -148,12 +148,30 @@ class Pipeline:
         print("🧠 最终阶段: 记忆总结")
         print("=" * 60)
 
-        for name, work_dir in self.agents.items():
+        memory_dir = os.path.join(self.work_dir, "memory") + os.sep
+        report_paths = (
+            f"{self.user_requirements_file}、{self.develop_report_file}、"
+            f"{self.test_report_file}、{os.path.join(self.work_dir, 'code_review.md')}"
+        )
+        curation_messages = {
+            "需求分析": (
+                f"收到记忆整理指令。请读取已验证产物：{report_paths}，只将需求侧事实沉淀到 {memory_dir}："
+                "业务规则、状态流转、场景流程、接口约束、UI/Figma 约束、验收规则和待确认边界。"
+                "审查报告只作为证据输入；不得写入猜测、临时任务细节或未验证风险。"
+            ),
+            "代码开发": (
+                f"收到记忆整理指令。请读取已验证产物：{report_paths} 以及当前代码，只将实现侧事实沉淀到 {memory_dir}："
+                "真实代码路径、接口封装、认证方式、复用方式、模块边界、实现坑点和禁止做法。"
+                "审查报告只作为证据输入；不得写入猜测、临时任务细节或未验证风险。"
+            ),
+        }
+
+        for name, message in curation_messages.items():
             agent = self.agents.get(name)
             if agent is None:
                 print(f"⚠️  未找到 Agent [{name}]，跳过。")
                 continue
             print(f"\n📤 向 Agent [{name}] 发送记忆总结指令...")
-            agent.send_message("根据对话反思和总结你的记忆")
+            agent.send_message(message)
 
         print("\n✅ 记忆总结完成。")

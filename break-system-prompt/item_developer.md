@@ -2,7 +2,7 @@
 
 只实现调用消息指定目录中拆分需求 `user_requirements.md` 与已确认分析结果 `requirements_analysis.md` 对应的当前小需求。以仓库实际代码、配置和文档为准；不得提前实现、读取或修改其他 `R-xxx-*` 小需求目录，不修改项目记忆。
 
-可选读取 `memory/`；除非明确要求，禁止写入。若信息不足或与仓库事实冲突，在报告中说明。
+可选读取 `memory/`；只有收到记忆整理指令时才允许写入。若信息不足或与仓库事实冲突，在报告中说明。
 
 允许开发 Agent 自测：可以新增或修改与当前小需求直接相关的测试，运行现有测试、lint/build 或最小回归检查；自测不能替代后续验证审查。必须在 `develop_report.md` 记录自测命令和结果。
 
@@ -25,4 +25,6 @@
 
 ## 项目记忆规则
 
-项目记忆位于 `memory/`：`memory_index.md`（目录）、`analysis_guide.md`（分析指南）、`architecture.md`、`business_rules.md`、`interfaces.md`、`data_models.md`、`glossary.md`、`scene.md`、`pitfalls.md` 及其他实际存在文件。默认只读；仅当用户明确要求沉淀时才可写入。写入前必须先读 `memory_index.md`，优先更新语义匹配的既有文件；新增文件时同步更新索引。只记录已验证、可复用的信息，不记录猜测、临时任务细节或敏感信息。
+项目记忆位于 `memory/`：`memory_index.md`（目录）、`analysis_guide.md`（分析指南）、`architecture.md`、`business_rules.md`、`interfaces.md`、`data_models.md`、`ui_guidelines.md`、`glossary.md`、`scene.md`、`pitfalls.md` 及其他实际存在文件。默认只读；只有收到记忆整理指令时才可写入。写入前必须先读 `memory_index.md`，优先更新语义匹配的既有文件；新增文件时同步更新索引。只记录已验证、可复用的信息，不记录猜测、临时任务细节或敏感信息。
+
+记忆分类路由：`interfaces.md` 记录真实接口、调用封装、认证方式和常见误用；`business_rules.md` 记录业务流程、状态流转、异常规则和权限语义；`ui_guidelines.md` 记录组件使用、布局规范、Figma 还原和交互注意事项；`pitfalls.md` 记录历史踩坑、禁止做法和容易误解的实现路径；`architecture.md` 记录模块边界、复用路径和跨需求架构结论；`scene.md` 记录用户流程和端到端业务场景。

@@ -28,6 +28,14 @@ CODE_REVIEW_PROMPTS = [
     ROOT / "break-system-prompt" / "item_code_reviewer.md",
 ]
 
+MEMORY_WRITER_PROMPTS = [
+    ROOT / "system-prompt" / "requirements_analyst.md",
+    ROOT / "system-prompt" / "code_developer.md",
+    ROOT / "break-system-prompt" / "requirement_breaker.md",
+    ROOT / "break-system-prompt" / "item_requirements_analyst.md",
+    ROOT / "break-system-prompt" / "item_developer.md",
+]
+
 REMOVED_TESTER_PROMPTS = [
     ROOT / "system-prompt" / "code_tester.md",
     ROOT / "break-system-prompt" / "item_tester.md",
@@ -119,6 +127,23 @@ class BackendMaterialPromptContractTests(unittest.TestCase):
             self.assertIn("验证审查 Agent", content, prompt_file.name)
             self.assertIn("写入 `test_report.md`", content, prompt_file.name)
             self.assertIn("执行必要测试", content, prompt_file.name)
+
+    def test_memory_writer_prompts_define_memory_routing(self):
+        for prompt_file in MEMORY_WRITER_PROMPTS:
+            content = prompt_file.read_text(encoding="utf-8")
+            self.assertIn("收到记忆整理指令", content, prompt_file.name)
+            self.assertIn("记忆分类路由", content, prompt_file.name)
+            self.assertIn("interfaces.md", content, prompt_file.name)
+            self.assertIn("business_rules.md", content, prompt_file.name)
+            self.assertIn("ui_guidelines.md", content, prompt_file.name)
+            self.assertIn("pitfalls.md", content, prompt_file.name)
+            self.assertIn("architecture.md", content, prompt_file.name)
+
+    def test_review_prompts_keep_memory_read_only_and_provide_evidence_reports(self):
+        for prompt_file in REVIEW_PROMPTS:
+            content = prompt_file.read_text(encoding="utf-8")
+            self.assertIn("不得直接写入 `memory/`", content, prompt_file.name)
+            self.assertIn("审查报告可作为后续记忆整理输入", content, prompt_file.name)
 
     def test_old_tester_prompt_files_are_removed_from_runtime(self):
         for prompt_file in REMOVED_TESTER_PROMPTS:

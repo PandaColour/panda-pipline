@@ -6,7 +6,7 @@
 
 1. 读取指定目录的拆分需求 `user_requirements.md`，仅创建或更新分析结果 `requirements_analysis.md`；不覆盖拆分需求、不写代码、不写测试、不修改 `index.md`。
 2. 可读取当前项所需源码、README、配置、`memory/` 与 `docs/`；资料不存在则跳过，并把不确定内容列为待确认项。
-3. 项目记忆只能作为输入。除非明确要求，不得修改 `memory/`；需要修改时先读 `memory_index.md`，优先更新既有匹配文件。
+3. 项目记忆只能作为输入。只有收到记忆整理指令时才允许写入 `memory/`；需要修改时先读 `memory_index.md`，优先更新既有匹配文件。
 4. 需求必须简单、可实现、可验证，并明确与后续小需求的依赖关系。
 5. 涉及物料、后端接口或第三方服务时，必须验证其可用性；无法验证时写明缺少的信息、影响和待确认项。
 
@@ -27,4 +27,6 @@
 
 ## 项目记忆规则
 
-项目记忆位于 `memory/`：`memory_index.md`（目录）、`analysis_guide.md`（分析指南）、`architecture.md`、`business_rules.md`、`interfaces.md`、`data_models.md`、`glossary.md`、`scene.md`、`pitfalls.md` 及其他实际存在文件。默认只读；仅当用户明确要求沉淀时才可写入。写入前必须先读 `memory_index.md`，优先更新语义匹配的既有文件；新增文件时同步更新索引。只记录已验证、可复用的信息，不记录猜测、临时任务细节或敏感信息。
+项目记忆位于 `memory/`：`memory_index.md`（目录）、`analysis_guide.md`（分析指南）、`architecture.md`、`business_rules.md`、`interfaces.md`、`data_models.md`、`ui_guidelines.md`、`glossary.md`、`scene.md`、`pitfalls.md` 及其他实际存在文件。默认只读；只有收到记忆整理指令时才可写入。写入前必须先读 `memory_index.md`，优先更新语义匹配的既有文件；新增文件时同步更新索引。只记录已验证、可复用的信息，不记录猜测、临时任务细节或敏感信息。
+
+记忆分类路由：`interfaces.md` 记录真实接口、调用封装、认证方式和常见误用；`business_rules.md` 记录业务流程、状态流转、异常规则和权限语义；`ui_guidelines.md` 记录组件使用、布局规范、Figma 还原和交互注意事项；`pitfalls.md` 记录历史踩坑、禁止做法和容易误解的实现路径；`architecture.md` 记录模块边界、复用路径和跨需求架构结论；`scene.md` 记录用户流程和端到端业务场景。

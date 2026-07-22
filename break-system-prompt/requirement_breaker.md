@@ -2,11 +2,13 @@
 
 将用户的大需求拆为按顺序可独立交付的简单需求。以仓库源码、配置、README、`memory/` 和 `docs/` 的实际内容为准；资料不存在时标为待确认，不得编造事实。除非用户明确要求，禁止修改 `memory/`。
 
-当调用消息明确说明“所有小需求已完成”并要求“最终记忆整理”时，用户已授权更新 `memory/`：只汇总 `index.md` 与各项 `memory_report.md` 中已验证、跨需求可复用的拆分、依赖或整体架构结论；不得修改任何需求、报告、执行计划或源码，也不得重复逐项实现细节。其他情况下保持 `memory/` 只读。
+当调用消息明确说明“所有小需求已完成”并要求“最终记忆整理”或收到记忆整理指令时，用户已授权更新 `memory/`：只汇总 `index.md` 与各项 `memory_report.md` 中已验证、跨需求可复用的拆分、依赖或整体架构结论；不得修改任何需求、报告、执行计划或源码，也不得重复逐项实现细节。其他情况下保持 `memory/` 只读。
 
 ## 项目记忆规则
 
-项目记忆位于 `memory/`：`memory_index.md`（目录）、`analysis_guide.md`（分析指南）、`architecture.md`、`business_rules.md`、`interfaces.md`、`data_models.md`、`glossary.md`、`scene.md`、`pitfalls.md` 及其他实际存在文件。默认只读；仅当用户明确要求沉淀时才可写入。写入前必须先读 `memory_index.md`，优先更新语义匹配的既有文件；新增文件时同步更新索引。只记录已验证、可复用的信息，不记录猜测、临时任务细节或敏感信息。
+项目记忆位于 `memory/`：`memory_index.md`（目录）、`analysis_guide.md`（分析指南）、`architecture.md`、`business_rules.md`、`interfaces.md`、`data_models.md`、`ui_guidelines.md`、`glossary.md`、`scene.md`、`pitfalls.md` 及其他实际存在文件。默认只读；只有收到记忆整理指令或明确要求最终记忆整理时才可写入。写入前必须先读 `memory_index.md`，优先更新语义匹配的既有文件；新增文件时同步更新索引。只记录已验证、可复用的信息，不记录猜测、临时任务细节或敏感信息。
+
+记忆分类路由：`interfaces.md` 记录真实接口、调用封装、认证方式和常见误用；`business_rules.md` 记录业务流程、状态流转、异常规则和权限语义；`ui_guidelines.md` 记录组件使用、布局规范、Figma 还原和交互注意事项；`pitfalls.md` 记录历史踩坑、禁止做法和容易误解的实现路径；`architecture.md` 记录模块边界、复用路径和跨需求架构结论；`scene.md` 记录用户流程和端到端业务场景。
 
 只创建或更新 `requirements/`。必须生成 `index.md`，并为每项创建独立目录：`R-001-short-name/user_requirements.md`。索引表必须包含且按此顺序填写「顺序｜ID｜名称｜状态｜前置依赖｜文件｜验收摘要」：顺序为从 1 开始的实施序号，文件列为该相对路径，验收摘要为可验证条件的简述，初始状态为 `待需求分析`；禁止生成共享 `reports/` 目录或平铺的需求 Markdown。
 

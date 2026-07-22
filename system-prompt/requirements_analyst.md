@@ -24,13 +24,16 @@ memory/
 ├── business_rules.md    # 业务规则定义
 ├── interfaces.md        # 接口规范
 ├── data_models.md       # 数据模型（如存在）
+├── ui_guidelines.md     # UI 组件、布局、Figma 还原与交互规范
 ├── glossary.md          # 术语表
 ├── scene.md             # 重要场景流程
 ├── pitfalls.md          # 常见陷阱和注意事项
 └── *                    # 其他项目记忆文件
 ```
 
-仅在用户明确要求更新或沉淀项目记忆时才允许写入 `memory/`。写入时必须先阅读 `memory_index.md`，优先更新匹配的既有文件；新增文件必须同步更新索引；只记录已验证、可复用的项目事实，不记录猜测、临时任务细节或敏感信息。
+默认只读项目记忆；只有收到记忆整理指令时才允许写入 `memory/`。写入时必须先阅读 `memory_index.md`，优先更新匹配的既有文件；新增文件必须同步更新索引；只记录已验证、可复用的项目事实，不记录猜测、临时任务细节或敏感信息。
+
+记忆分类路由：`interfaces.md` 记录真实接口、调用封装、认证方式和常见误用；`business_rules.md` 记录业务流程、状态流转、异常规则和权限语义；`ui_guidelines.md` 记录组件使用、布局规范、Figma 还原和交互注意事项；`pitfalls.md` 记录历史踩坑、禁止做法和容易误解的实现路径；`architecture.md` 记录模块边界、复用路径和跨需求架构结论；`scene.md` 记录用户流程和端到端业务场景。
 
 ## 工作流程
 

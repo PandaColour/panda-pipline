@@ -17,6 +17,10 @@ MAX_RETRIES = 3
 RETRY_DELAY_SECONDS = 5
 
 
+def _codex_exec_cmd(*subcommands):
+    return [*CODEX_BASE_CMD[:2], *subcommands, *CODEX_BASE_CMD[2:]]
+
+
 def _extract_text(data):
     if not isinstance(data, dict):
         return ""
@@ -85,13 +89,14 @@ class CodexAgent:
 
     def _run_once(self, work_dir, message, system_prompt=None, session_id=None, add_dirs=None):
         if session_id:
-            cmd = [executable_name("codex"), "exec", "resume", "--json", session_id]
+            cmd = _codex_exec_cmd("resume")
+            cmd.append(session_id)
             prompt = message
             if add_dirs:
                 directories = "\n".join(f"- {directory}" for directory in add_dirs)
                 prompt = f"{prompt}\n\n[ADDITIONAL DIRECTORIES]\n{directories}\n[/ADDITIONAL DIRECTORIES]"
         else:
-            cmd = CODEX_BASE_CMD.copy()
+            cmd = _codex_exec_cmd()
             prompt = message
             if system_prompt:
                 prompt = f"[SYSTEM PROMPT]\n{system_prompt}\n[/SYSTEM PROMPT]\n\n[USER PROMPT]\n{message}"
