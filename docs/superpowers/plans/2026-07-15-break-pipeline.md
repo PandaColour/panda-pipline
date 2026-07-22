@@ -67,7 +67,6 @@ Expected: PASS.
 - Create: `break-system-prompt/requirement_breaker.md`
 - Create: `break-system-prompt/requirement_break_reviewer.md`
 - Create: `break-system-prompt/item_developer.md`
-- Create: `break-system-prompt/item_tester.md`
 - Create: `break-system-prompt/item_code_reviewer.md`
 - Test: `tests/test_break_pipeline.py`
 
@@ -176,7 +175,7 @@ Expected: FAIL because parsing and execution do not exist.
 
 - [ ] **Step 3: Implement strict Markdown-table parser and state transitions**
 
-Reject duplicate IDs, unsupported status, missing files, cycles, unknown dependencies, and dependency-order violations. Persist state changes by replacing only the index status cell. Select the lowest-order pending/rework item with completed dependencies. Run developer → tester → reviewer; return review and human feedback only to current developer.
+Reject duplicate IDs, unsupported status, missing files, cycles, unknown dependencies, and dependency-order violations. Persist state changes by replacing only the index status cell. Select the lowest-order pending/rework item with completed dependencies. Run developer → validation-reviewer; return review and human feedback only to current developer.
 
 - [ ] **Step 4: Run all break workflow tests**
 

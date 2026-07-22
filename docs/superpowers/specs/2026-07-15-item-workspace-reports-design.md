@@ -37,9 +37,9 @@ Prompt contracts mirror the existing `system-prompt/` rules:
 - The item developer reads `user_requirements.md`, writes
   `develop_report.md` with overview, changes, verification, implementation
   status, and handoff risks; it does not write tests.
-- The item tester reads the requirement and development report, writes
-  `test_report.md` with overview, cases, execution results, remaining issues,
-  and writes `bug_report.md` only for observed defects.
+- The item validation-review agent reads the requirement and development report,
+  writes `test_report.md` with overview, cases, execution results, remaining
+  issues, and writes `bug_report.md` only for observed defects.
 - The item code reviewer reads the three primary reports and writes
   `code_review.md`; its only passing token is `任务完成`.
 

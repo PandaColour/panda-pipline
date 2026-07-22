@@ -28,6 +28,16 @@ CODE_REVIEW_PROMPTS = [
     ROOT / "break-system-prompt" / "item_code_reviewer.md",
 ]
 
+REMOVED_TESTER_PROMPTS = [
+    ROOT / "system-prompt" / "code_tester.md",
+    ROOT / "break-system-prompt" / "item_tester.md",
+]
+
+RUNTIME_FILES = [
+    ROOT / "pipeline.py",
+    ROOT / "break_pipeline.py",
+]
+
 
 class BackendMaterialPromptContractTests(unittest.TestCase):
     def test_requirement_analysis_prompts_require_material_and_interface_availability_checks(self):
@@ -44,6 +54,14 @@ class BackendMaterialPromptContractTests(unittest.TestCase):
             self.assertIn("mock 方法/位置/范围", content, prompt_file.name)
             self.assertIn("TODO：请人类使用者尽快补充后端接口信息并完善代码", content, prompt_file.name)
 
+    def test_developer_prompts_allow_self_testing(self):
+        for prompt_file in DEVELOPER_PROMPTS:
+            content = prompt_file.read_text(encoding="utf-8")
+            self.assertIn("允许开发 Agent 自测", content, prompt_file.name)
+            self.assertIn("自测命令和结果", content, prompt_file.name)
+            self.assertNotIn("不编写或修改测试代码", content, prompt_file.name)
+            self.assertNotIn("不编写测试代码", content, prompt_file.name)
+
     def test_review_prompts_allow_disclosed_mocks_but_require_backend_todo(self):
         for prompt_file in REVIEW_PROMPTS:
             content = prompt_file.read_text(encoding="utf-8")
@@ -59,6 +77,25 @@ class BackendMaterialPromptContractTests(unittest.TestCase):
             self.assertIn("已有依赖库", content, prompt_file.name)
             self.assertIn("复用已有代码", content, prompt_file.name)
             self.assertIn("对其他功能的影响最小", content, prompt_file.name)
+            self.assertIn("不满足上述要求", content, prompt_file.name)
+            self.assertIn("要求开发 Agent 修改", content, prompt_file.name)
+
+    def test_code_review_prompts_take_over_test_report_output(self):
+        for prompt_file in CODE_REVIEW_PROMPTS:
+            content = prompt_file.read_text(encoding="utf-8")
+            self.assertIn("验证审查 Agent", content, prompt_file.name)
+            self.assertIn("写入 `test_report.md`", content, prompt_file.name)
+            self.assertIn("执行必要测试", content, prompt_file.name)
+
+    def test_old_tester_prompt_files_are_removed_from_runtime(self):
+        for prompt_file in REMOVED_TESTER_PROMPTS:
+            self.assertFalse(prompt_file.exists(), prompt_file.name)
+
+        runtime_content = "\n".join(path.read_text(encoding="utf-8") for path in RUNTIME_FILES)
+        self.assertNotIn("code_tester.md", runtime_content)
+        self.assertNotIn("item_tester.md", runtime_content)
+        self.assertNotIn("代码单元测试", runtime_content)
+        self.assertNotIn("小需求测试", runtime_content)
 
 
 if __name__ == "__main__":

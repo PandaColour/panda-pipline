@@ -64,8 +64,8 @@ class BreakPipelineTests(unittest.TestCase):
             second = pipeline._item_agents(item)
 
         self.assertIs(first, second)
-        self.assertEqual(create_agent.call_count, 5)
-        self.assertEqual(set(first), {"analyst", "requirements_reviewer", "developer", "tester", "code_reviewer"})
+        self.assertEqual(create_agent.call_count, 4)
+        self.assertEqual(set(first), {"analyst", "requirements_reviewer", "developer", "code_reviewer"})
 
     def test_different_items_get_different_agent_sets(self):
         pipeline = BreakPipeline("workspace")
@@ -77,7 +77,7 @@ class BreakPipelineTests(unittest.TestCase):
             second = pipeline._item_agents(second_item)
 
         self.assertIsNot(first, second)
-        self.assertEqual(create_agent.call_count, 10)
+        self.assertEqual(create_agent.call_count, 8)
 
     def test_memory_completion_releases_current_item_agents(self):
         pipeline = BreakPipeline("workspace")
@@ -106,7 +106,6 @@ class BreakPipelineTests(unittest.TestCase):
             self.assertEqual(agents["analyst"].send_message.call_count, 1)
             self.assertEqual(agents["requirements_reviewer"].send_message.call_count, 1)
             self.assertEqual(agents["developer"].send_message.call_count, 2)
-            self.assertEqual(agents["tester"].send_message.call_count, 2)
             self.assertEqual(agents["code_reviewer"].send_message.call_count, 2)
             self.assertIn("memory_report.md", agents["developer"].send_message.call_args.args[0])
             plan = json.loads(Path(pipeline.execution_plan_file).read_text(encoding="utf-8"))
@@ -145,7 +144,6 @@ class BreakPipelineTests(unittest.TestCase):
             "analyst": MagicMock(),
             "requirements_reviewer": MagicMock(),
             "developer": MagicMock(),
-            "tester": MagicMock(),
             "code_reviewer": MagicMock(),
         }
     def test_agent_loads_prompt_from_explicit_prompt_directory(self):

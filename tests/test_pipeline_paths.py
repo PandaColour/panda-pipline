@@ -29,14 +29,12 @@ class PipelinePathTests(unittest.TestCase):
             pipeline = Pipeline(work_dir)
 
             developer = MagicMock()
-            tester = MagicMock()
             code_reviewer = MagicMock()
             code_reviewer.send_message.return_value = "任务完成"
 
             agents = {
                 "代码开发": developer,
-                "代码单元测试": tester,
-                "代码review": code_reviewer,
+                "代码验证审查": code_reviewer,
             }
             created = []
 
@@ -53,23 +51,22 @@ class PipelinePathTests(unittest.TestCase):
                 created,
                 [
                     ("代码开发", "code_developer.md"),
-                    ("代码单元测试", "code_tester.md"),
-                    ("代码review", "code_reviewer.md"),
+                    ("代码验证审查", "code_reviewer.md"),
                 ],
             )
             mkdir.assert_not_called()
 
             developer_prompt = developer.send_message.call_args.args[0]
-            tester_prompt = tester.send_message.call_args.args[0]
             reviewer_prompt = code_reviewer.send_message.call_args.args[0]
 
             self.assertIn(pipeline.user_requirements_file, developer_prompt)
             self.assertIn(pipeline.develop_report_file, developer_prompt)
-            self.assertIn(pipeline.develop_report_file, tester_prompt)
-            self.assertIn(pipeline.test_report_file, tester_prompt)
+            self.assertIn("自测", developer_prompt)
+            self.assertNotIn("不要编写测试代码", developer_prompt)
             self.assertIn(pipeline.user_requirements_file, reviewer_prompt)
             self.assertIn(pipeline.develop_report_file, reviewer_prompt)
             self.assertIn(pipeline.test_report_file, reviewer_prompt)
+            self.assertIn("执行必要测试", reviewer_prompt)
 
     def test_create_agent_always_uses_pipeline_root(self):
         pipeline = Pipeline("relative-workspace")

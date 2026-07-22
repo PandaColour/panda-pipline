@@ -60,8 +60,7 @@ class BreakPipeline:
                 "analyst": self._create_agent(f"{prefix} 小需求需求分析", "item_requirements_analyst.md"),
                 "requirements_reviewer": self._create_agent(f"{prefix} 小需求需求评审", "item_requirements_reviewer.md"),
                 "developer": self._create_agent(f"{prefix} 小需求开发", "item_developer.md"),
-                "tester": self._create_agent(f"{prefix} 小需求测试", "item_tester.md"),
-                "code_reviewer": self._create_agent(f"{prefix} 小需求代码审查", "item_code_reviewer.md"),
+                "code_reviewer": self._create_agent(f"{prefix} 小需求验证审查", "item_code_reviewer.md"),
             }
         return self._active_item_agents[item.requirement_id]
 
@@ -137,7 +136,7 @@ class BreakPipeline:
                 items = self._load_items()
                 self._validate_items(items)
                 continue
-            self._run_item(item, item_agents["developer"], item_agents["tester"], item_agents["code_reviewer"])
+            self._run_item(item, item_agents["developer"], item_agents["code_reviewer"])
             items = self._load_items()
             self._validate_items(items)
         unfinished = [item for item in items if item.status not in {"已完成"}]
@@ -188,7 +187,7 @@ class BreakPipeline:
         feedback = self._human_gate(f"2. 小需求 {item.requirement_id} 需求分析", self._item_paths(item)["requirements_analysis"])
         self._set_status(item.requirement_id, "待实施" if feedback is None else "需求返工中")
 
-    def _run_item(self, item, developer, tester, reviewer):
+    def _run_item(self, item, developer, reviewer):
         paths = self._item_paths(item)
         os.makedirs(paths["workspace"], exist_ok=True)
         requirement_file = paths["requirements"]
@@ -198,7 +197,8 @@ class BreakPipeline:
         review_report = paths["code_review"]
         self._set_status(item.requirement_id, "开发中")
         initial_message = (
-            f"只实现当前需求 {item.requirement_id}。阅读 {requirement_file} 和 {analysis_report}，完成后写 {develop_report}。"
+            f"只实现当前需求 {item.requirement_id}。阅读 {requirement_file} 和 {analysis_report}。"
+            f"允许进行必要自测，并将自测命令和结果写入 {develop_report}。完成后写 {develop_report}。"
             "不得实现其他需求，也不要修改 requirements/index.md。"
         )
         feedback = self._pending_human_feedback.pop(item.requirement_id, None)
@@ -206,12 +206,9 @@ class BreakPipeline:
             initial_message += f"\n上次人工审核意见：{feedback}\n请仅修正当前项。"
         developer.send_message(initial_message)
         while True:
-            tester.send_message(
-                f"只测试当前需求 {item.requirement_id}。阅读 {requirement_file}、{analysis_report} 和 {develop_report}，"
-                f"执行必要测试并写 {test_report}。不得实现其他需求。"
-            )
             review = reviewer.send_message(
-                f"只审查当前需求 {item.requirement_id}。阅读 {requirement_file}、{analysis_report}、{develop_report}、{test_report}。"
+                f"只验证并审查当前需求 {item.requirement_id}。阅读 {requirement_file}、{analysis_report}、{develop_report}、当前代码和测试。"
+                f"执行必要测试并写 {test_report}；发现缺陷时写 {paths['bug']}。"
                 f"将审查结论写入 {review_report}。通过时在 FINAL_ANSWER JSON 中输出 status=approved 且 approval_token={ITEM_APPROVAL}；否则输出 changes_requested 和当前项的具体修改意见。"
             )
             if self._is_requirement_change(review):
@@ -253,7 +250,7 @@ class BreakPipeline:
             f"{paths['requirements']}、{paths['requirements_analysis']}、{paths['develop']}、"
             f"{paths['test']}、{paths['code_review']}"
         )
-        for role in ("analyst", "requirements_reviewer", "tester", "code_reviewer", "developer"):
+        for role in ("analyst", "requirements_reviewer", "code_reviewer", "developer"):
             message = (
                 f"当前需求 {item.requirement_id} 已通过人工审核。请基于你在该需求中的对话和职责，"
                 f"阅读需要核验的正式产物：{report_paths}，只将已验证且可复用的结论沉淀到 "

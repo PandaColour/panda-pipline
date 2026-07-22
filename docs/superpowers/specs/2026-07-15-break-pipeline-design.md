@@ -32,8 +32,8 @@ the resolved work directory and calls `run()`.
    a breakdown-review agent until its explicit approval; then request one
    human approval for the whole breakdown.
 2. **Execution:** read the approved index, validate its dependency graph, and
-   process requirements in order. Each item runs developer, tester, and code
-   reviewer agents. After reviewer approval, a human gate approves or returns
+   process requirements in order. Each item runs developer and validation-review
+   agents. After validation-review approval, a human gate approves or returns
    feedback for only that item.
 
 All agents run in the target repository root and receive absolute paths for
@@ -47,9 +47,8 @@ every required input and report file.
 | `break_pipeline.py` | Breakdown, review, status, dependency, and item-execution orchestration. |
 | `break-system-prompt/requirement_breaker.md` | Produces small, ordered, verifiable requirements and the index. |
 | `break-system-prompt/requirement_break_reviewer.md` | Rejects incomplete, overlapping, non-verifiable, or incorrectly ordered decompositions. |
-| `break-system-prompt/item_developer.md` | Implements only the currently selected requirement and writes its development report. |
-| `break-system-prompt/item_tester.md` | Tests only the currently selected requirement and affected regression paths. |
-| `break-system-prompt/item_code_reviewer.md` | Reviews only the current item's requirement, implementation, and tests. |
+| `break-system-prompt/item_developer.md` | Implements only the currently selected requirement, may self-test, and writes its development report. |
+| `break-system-prompt/item_code_reviewer.md` | Executes necessary tests, writes test results, and reviews only the current item's requirement, implementation, and tests. |
 | `tests/test_break_pipeline.py` | Unit tests for the new workflow. |
 | `tests/test_break_main.py` | Unit tests for entry-point repository setup behavior. |
 
@@ -116,10 +115,10 @@ requires separately releasable or separately testable behavior.
    `已完成`; otherwise mark unresolved eligible items `阻塞` and stop with a
    useful diagnostic.
 3. Set the selected item to `开发中` in `index.md`.
-4. Ask developer, tester, and reviewer agents to work only on the selected
+4. Ask developer and validation-review agents to work only on the selected
    requirement and its item-scoped report paths.
 5. If code review does not contain `任务完成`, send that feedback only to the
-   current developer and repeat testing and review for that item.
+   current developer and repeat validation-review for that item.
 6. On code-review approval, set the current status to `待人工确认` and invoke
    the human gate.
 7. Human approval sets the item to `已完成`; feedback sets it to `返工中` and

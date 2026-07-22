@@ -91,29 +91,22 @@ class Pipeline:
         print("=" * 60)
 
         developer = self._create_agent("代码开发", "code_developer.md")
-        tester = self._create_agent("代码单元测试", "code_tester.md")
-        code_reviewer = self._create_agent("代码review", "code_reviewer.md")
+        code_reviewer = self._create_agent("代码验证审查", "code_reviewer.md")
 
         while True:
             developer.send_message(
                 f"请先阅读 {self.user_requirements_file} 中的需求文档，"
                 f"然后编写代码实现。"
+                f"允许进行必要自测，并将自测命令和结果写入 {self.develop_report_file}。"
                 f"开发完成后，输出 {self.develop_report_file},返回前确保文件创建成功"
-                f"不要编写测试代码。"
-            )
-
-            tester.send_message(
-                f"请先阅读 {self.develop_report_file} 了解变更范围，"
-                f"然后阅读 {self.work_dir} 下的源代码，"
-                f"在测试目录下编写单元测试并实际执行测试命令。"
-                f"输出 {self.test_report_file}，如有 Bug 生成 {self.work_dir}/bug_report.md。"
             )
 
             review_response = code_reviewer.send_message(
                 f"请先阅读 {self.user_requirements_file}、"
-                f"{self.develop_report_file} 和 "
-                f"{self.test_report_file}，"
-                f"然后审查 {self.work_dir} 下的代码和 {self.work_dir} 下的测试。"
+                f"{self.develop_report_file} 和 {self.work_dir} 下的代码、测试。"
+                f"执行必要测试，并将测试范围、命令、结果和遗留问题写入 {self.test_report_file}；"
+                f"如有 Bug 生成 {self.work_dir}/bug_report.md。"
+                f"然后审查 {self.work_dir} 下的代码和测试。"
                 f"如果所有检查通过，最终回复按 FINAL_ANSWER JSON 协议输出 status=approved 且 approval_token=任务完成。"
                 f"否则请提供具体的修改建议。"
             )
