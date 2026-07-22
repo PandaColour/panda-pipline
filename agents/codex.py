@@ -1,6 +1,7 @@
 import json
 import subprocess
 import sys
+import time
 
 from ._result import AgentRunResult
 from ._cli import executable_name
@@ -12,6 +13,8 @@ CODEX_BASE_CMD = [
     "--sandbox", "danger-full-access",
     "--json",
 ]
+MAX_RETRIES = 3
+RETRY_DELAY_SECONDS = 5
 
 
 def _extract_text(data):
@@ -70,6 +73,17 @@ def parse_stream(json_line, stream_state):
 
 class CodexAgent:
     def run(self, work_dir, message, system_prompt=None, session_id=None, add_dirs=None):
+        current_session_id = session_id
+        result = self._run_once(work_dir, message, system_prompt, current_session_id, add_dirs)
+        for _attempt in range(MAX_RETRIES):
+            current_session_id = result.session_id or current_session_id
+            if result.returncode == 0:
+                return result
+            time.sleep(RETRY_DELAY_SECONDS)
+            result = self._run_once(work_dir, message, system_prompt, current_session_id, add_dirs)
+        return result
+
+    def _run_once(self, work_dir, message, system_prompt=None, session_id=None, add_dirs=None):
         if session_id:
             cmd = [executable_name("codex"), "exec", "resume", "--json", session_id]
             prompt = message
@@ -93,17 +107,21 @@ class CodexAgent:
             process.stdin.write(prompt)
             process.stdin.close()
             text_parts = []
+            raw_output_parts = []
             stream_state = {"session_id": session_id, "final_text": None}
             while True:
                 line = process.stdout.readline()
                 if not line and process.poll() is not None:
                     break
                 if line:
+                    raw_output_parts.append(line)
                     text = parse_stream(line, stream_state)
                     if text:
                         text_parts.append(text)
             process.wait()
-            error = None if process.returncode == 0 else f"Codex exited with code {process.returncode}"
+            error = None if process.returncode == 0 else "".join(raw_output_parts).strip() or (
+                f"Codex exited with code {process.returncode}"
+            )
             return AgentRunResult(
                 stream_state["final_text"] or "".join(text_parts),
                 stream_state["session_id"],
