@@ -54,6 +54,13 @@ class BackendMaterialPromptContractTests(unittest.TestCase):
             self.assertIn("mock 方法/位置/范围", content, prompt_file.name)
             self.assertIn("TODO：请人类使用者尽快补充后端接口信息并完善代码", content, prompt_file.name)
 
+    def test_developer_prompts_treat_missing_requirement_interface_info_as_existing_code_signal(self):
+        for prompt_file in DEVELOPER_PROMPTS:
+            content = prompt_file.read_text(encoding="utf-8")
+            self.assertIn("需求文档未提到接口信息", content, prompt_file.name)
+            self.assertIn("优先检索仓库既有接口封装、服务调用、API 客户端、路由和配置", content, prompt_file.name)
+            self.assertIn("不得直接判定为无接口或自行 mock", content, prompt_file.name)
+
     def test_developer_prompts_allow_self_testing(self):
         for prompt_file in DEVELOPER_PROMPTS:
             content = prompt_file.read_text(encoding="utf-8")
