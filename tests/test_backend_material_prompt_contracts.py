@@ -86,6 +86,14 @@ class BackendMaterialPromptContractTests(unittest.TestCase):
             self.assertIn("缺少后端不可用原因、mock 方法/位置/范围或 TODO", content, prompt_file.name)
             self.assertIn("TODO：请人类使用者尽快补充后端接口信息并完善代码", content, prompt_file.name)
 
+    def test_review_prompts_allow_evidence_based_inference_without_fabrication(self):
+        for prompt_file in REVIEW_PROMPTS:
+            content = prompt_file.read_text(encoding="utf-8")
+            self.assertIn("证据化推断", content, prompt_file.name)
+            self.assertIn("推断依据、影响范围、是否仍需人类确认", content, prompt_file.name)
+            self.assertIn("不得编造产品规则、接口契约、权限策略或业务口径", content, prompt_file.name)
+            self.assertIn("缺少证据时应要求对应分析或开发 Agent 披露缺口、临时方案、影响和 TODO", content, prompt_file.name)
+
     def test_code_review_prompts_require_dependency_and_reuse_impact_review(self):
         for prompt_file in CODE_REVIEW_PROMPTS:
             content = prompt_file.read_text(encoding="utf-8")
