@@ -13,6 +13,7 @@ BREAK_SYSTEM_PROMPT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)
 BREAKDOWN_APPROVAL = "拆分方案通过"
 ITEM_APPROVAL = "任务完成"
 REQUIREMENTS_APPROVAL = "同意方案"
+MAX_REQUIREMENT_REVIEW_ATTEMPTS = 3
 VALID_STATUSES = {"待审核", "待需求分析", "待需求评审", "需求返工中", "待需求人工确认", "待实施", "开发中", "待人工确认", "待记忆整理", "记忆整理中", "已完成", "返工中", "阻塞"}
 
 
@@ -70,30 +71,41 @@ class BreakPipeline:
         for agent in item_agents.values():
             self.agents.pop(agent.name, None)
 
-    def run(self):
-        if not os.path.isfile(self.breakdown_approval_file):
+    def run(self, user_idea=None):
+        if user_idea is not None:
+            self._run_breakdown(user_idea)
+        elif not os.path.isfile(self.breakdown_approval_file):
             self._run_breakdown()
         if self._run_execution():
             self._run_final_reflection()
             print("\n🎉🎉🎉 【拆分流水线圆满完成】所有小需求均已通过！")
 
-    def _run_breakdown(self):
+    def _run_breakdown(self, user_idea=None):
         print("\n" + "=" * 60 + "\n📋 阶段 1: 大需求拆分\n" + "=" * 60)
         breaker = self._create_agent("需求拆分", "requirement_breaker.md")
         reviewer = self._create_agent("拆分评审", "requirement_break_reviewer.md")
-        if os.path.isfile(self.requirements_index_file):
+        has_existing_index = os.path.isfile(self.requirements_index_file)
+        if user_idea is None and has_existing_index:
             user_idea = "已有拆分产物；请在不重置已写内容的前提下完成恢复审查。"
-        else:
+        elif user_idea is None:
             user_idea = input("\n🎯 请输入总体开发需求描述:\n> ")
             breaker.send_message(self._breakdown_instruction(user_idea))
+        elif has_existing_index:
+            breaker.send_message(self._breakdown_update_instruction(user_idea))
+        else:
+            breaker.send_message(self._breakdown_instruction(user_idea))
         while True:
-            review = reviewer.send_message(
-                f"请审查拆分产物 {self.requirements_index_file} 及目录 {self.requirements_dir}，原始需求：{user_idea}。"
-                f"通过时在 FINAL_ANSWER JSON 中输出 status=approved 且 approval_token={BREAKDOWN_APPROVAL}；否则输出 changes_requested 和可执行修改意见。"
-            )
-            if not self._review_passed(review, BREAKDOWN_APPROVAL):
+            for attempt in range(1, MAX_REQUIREMENT_REVIEW_ATTEMPTS + 1):
+                review = reviewer.send_message(
+                    f"请审查拆分产物 {self.requirements_index_file} 及目录 {self.requirements_dir}，原始需求：{user_idea}。"
+                    f"通过时在 FINAL_ANSWER JSON 中输出 status=approved 且 approval_token={BREAKDOWN_APPROVAL}；否则输出 changes_requested 和可执行修改意见。"
+                )
+                if self._review_passed(review, BREAKDOWN_APPROVAL):
+                    break
+                if attempt >= MAX_REQUIREMENT_REVIEW_ATTEMPTS:
+                    print("⚠️ 拆分评审连续 3 次未通过，按策略自动进入人工确认，让后续流程先完成可完成内容。")
+                    break
                 breaker.send_message(f"拆分评审意见：{review}\n请更新 {self.requirements_dir}，仅修改拆分产物。")
-                continue
             feedback = self._human_gate("1. 大需求拆分", self.requirements_index_file)
             if feedback is None:
                 os.makedirs(self.requirements_dir, exist_ok=True)
@@ -107,6 +119,14 @@ class BreakPipeline:
             f"请将以下大需求拆分为简单、可实现、可验证且有依赖顺序的小需求。"
             f"创建 {self.requirements_index_file} 及 {self.requirements_dir}/001-<short-name>.md 等独立文件；"
             f"必须写入状态、前置依赖、范围、验收标准、风险。返回前确认文件存在。原始需求：{user_idea}"
+        )
+
+    def _breakdown_update_instruction(self, user_idea):
+        return (
+            f"收到新的需求或补充说明：{user_idea}。"
+            f"请阅读并保留现有拆分产物 {self.requirements_index_file} 及 {self.requirements_dir} 下各需求文件，"
+            f"只做与本次输入相关的增量调整；必要时新增、拆分或更新小需求，并保持依赖顺序、状态、范围、验收标准和风险一致。"
+            f"返回前确认 {self.requirements_index_file} 和相关需求文件已更新。"
         )
 
     def _run_execution(self):
@@ -166,14 +186,18 @@ class BreakPipeline:
             analysis_message += f"\n需要处理的需求变更意见：{feedback}"
         analyst.send_message(analysis_message)
         while True:
-            review = reviewer.send_message(
-                f"只评审当前需求 {item.requirement_id}。阅读 {requirement_file} 和 {analysis_report}，将结论写入 {review_report}。通过时在 FINAL_ANSWER JSON 中输出 status=approved 且 approval_token={REQUIREMENTS_APPROVAL}；否则输出 changes_requested 和具体修改意见。"
-            )
-            if not self._review_passed(review, REQUIREMENTS_APPROVAL):
+            for attempt in range(1, MAX_REQUIREMENT_REVIEW_ATTEMPTS + 1):
+                review = reviewer.send_message(
+                    f"只评审当前需求 {item.requirement_id}。阅读 {requirement_file} 和 {analysis_report}，将结论写入 {review_report}。通过时在 FINAL_ANSWER JSON 中输出 status=approved 且 approval_token={REQUIREMENTS_APPROVAL}；否则输出 changes_requested 和具体修改意见。"
+                )
+                if self._review_passed(review, REQUIREMENTS_APPROVAL):
+                    break
+                if attempt >= MAX_REQUIREMENT_REVIEW_ATTEMPTS:
+                    print(f"⚠️ 小需求 {item.requirement_id} 需求评审连续 3 次未通过，按策略自动进入人工确认。")
+                    break
                 self._set_status(item.requirement_id, "需求返工中")
                 analyst.send_message(f"当前需求 {item.requirement_id} 的需求评审意见：{review}\n请仅修订当前需求文档。")
                 self._set_status(item.requirement_id, "待需求评审")
-                continue
             self._set_status(item.requirement_id, "待需求人工确认")
             feedback = self._human_gate(f"2. 小需求 {item.requirement_id} 需求分析", analysis_report)
             if feedback is None:

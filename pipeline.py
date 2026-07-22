@@ -3,6 +3,8 @@ from agents import Agent
 from review_decision import review_passed
 from workflow import human_gate
 
+MAX_REQUIREMENT_REVIEW_ATTEMPTS = 3
+
 
 class Pipeline:
     """Multi-agent pipeline with feedback loops and human review gates."""
@@ -29,15 +31,15 @@ class Pipeline:
         self.agents[name] = agent
         return agent
 
-    def run(self):
-        self._run_stage_1_requirements()
+    def run(self, user_idea=None):
+        self._run_stage_1_requirements(user_idea)
         self._run_stage_2_development()
         self._run_final_reflection()
         print("\n🎉🎉🎉 【全流程圆满完成】所有阶段均已通过！")
 
     # ==================== Stage 1: Requirements ====================
 
-    def _run_stage_1_requirements(self):
+    def _run_stage_1_requirements(self, user_idea=None):
         print("\n" + "=" * 60)
         print("📋 阶段 1: 需求分析")
         print("=" * 60)
@@ -45,42 +47,53 @@ class Pipeline:
         analyst = self._create_agent("需求分析", "requirements_analyst.md")
         reviewer = self._create_agent("需求审查", "requirements_reviewer.md")
 
-        user_idea = input("\n🎯 请输入项目的总体开发需求描述:\n> ")
+        if user_idea is None:
+            user_idea = input("\n🎯 请输入项目的总体开发需求描述:\n> ")
+
+        existing_context = ""
+        if os.path.isfile(self.user_requirements_file):
+            existing_context = (
+                f"当前已存在 {self.user_requirements_file}，请结合既有内容和本次输入进行增量更新，"
+                f"避免无关重写。"
+            )
 
         analyst.send_message(
             f"请根据以下初始想法进行深度需求分析，创建{self.user_requirements_file},返回前确保文件创建成功"
             f"请详细列出功能模块和技术栈选型。"
+            f"{existing_context}"
             f"初始想法：{user_idea}"
         )
 
-        review_response = reviewer.send_message(
-            f"请审查 {self.user_requirements_file} 文件中的需求分析，原始需求: {user_idea}"
-            f"评估其完整性、一致性和可行性。如果满意，最终回复按 FINAL_ANSWER JSON 协议输出 status=approved 且 approval_token=同意方案。"
-            f"如果不满意，请提供具体的修改建议。"
-        )
-
         while True:
-            if review_response is None or review_response == "":
-                review_response = "同意方案"
+            review_prompt = (
+                f"请审查 {self.user_requirements_file} 文件中的需求分析，原始需求: {user_idea}"
+                f"评估其完整性、一致性和可行性。如果满意，最终回复按 FINAL_ANSWER JSON 协议输出 status=approved 且 approval_token=同意方案。"
+                f"如果不满意，请提供具体的修改建议。"
+            )
+            for attempt in range(1, MAX_REQUIREMENT_REVIEW_ATTEMPTS + 1):
+                review_response = reviewer.send_message(review_prompt)
 
-            if review_passed(review_response, "同意方案"):
-                human_feedback = self._human_gate("1. 需求分析", self.user_requirements_file)
-                if human_feedback is None:
+                if review_passed(review_response, "同意方案"):
                     break
-                analyst.send_message(
-                    f"用户审查后提出了修改意见，请根据以下意见调整并更新 "
-                    f"{self.user_requirements_file}。修改意见：{human_feedback}"
-                )
-            else:
+                if attempt >= MAX_REQUIREMENT_REVIEW_ATTEMPTS:
+                    print("⚠️ 需求审查连续 3 次未通过，按策略自动进入人工确认，让后续流程先完成可完成内容。")
+                    break
                 analyst.send_message(
                     f"需求审查提出了以下修改意见，请根据意见调整并更新 "
                     f"{self.user_requirements_file}。修改意见：{review_response}"
                 )
+                review_prompt = (
+                    f"请继续审查 {self.user_requirements_file} 文件中的需求分析,分析agent对它进行了一些修改"
+                    f"评估其完整性、一致性和可行性。如果满意，最终回复按 FINAL_ANSWER JSON 协议输出 status=approved 且 approval_token=同意方案。"
+                    f"如果不满意，请提供具体的修改建议。"
+                )
 
-            review_response = reviewer.send_message(
-                f"请继续审查 {self.user_requirements_file} 文件中的需求分析,分析agent对它进行了一些修改"
-                f"评估其完整性、一致性和可行性。如果满意，最终回复按 FINAL_ANSWER JSON 协议输出 status=approved 且 approval_token=同意方案。"
-                f"如果不满意，请提供具体的修改建议。"
+            human_feedback = self._human_gate("1. 需求分析", self.user_requirements_file)
+            if human_feedback is None:
+                break
+            analyst.send_message(
+                f"用户审查后提出了修改意见，请根据以下意见调整并更新 "
+                f"{self.user_requirements_file}。修改意见：{human_feedback}"
             )
 
     # ==================== Stage 2: Development ====================

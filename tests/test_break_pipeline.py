@@ -186,6 +186,40 @@ class BreakPipelineTests(unittest.TestCase):
         self.assertEqual(breaker.send_message.call_count, 3)
         self.assertIn(pipeline.requirements_index_file, gate.call_args_list[0].args)
 
+    def test_breakdown_review_auto_passes_after_three_failed_agent_reviews(self):
+        with tempfile.TemporaryDirectory() as work_dir:
+            pipeline = BreakPipeline(work_dir)
+            breaker = MagicMock()
+            reviewer = MagicMock()
+            reviewer.send_message.side_effect = ["缺少验收标准", "拆分粒度过大", "仍有阻塞风险"]
+
+            with patch.object(pipeline, "_create_agent", side_effect=[breaker, reviewer]), \
+                    patch("builtins.input", return_value="大需求"), \
+                    patch("break_pipeline.human_gate", return_value=None) as gate:
+                pipeline._run_breakdown()
+
+        self.assertEqual(reviewer.send_message.call_count, 3)
+        self.assertEqual(breaker.send_message.call_count, 3)
+        gate.assert_called_once()
+
+    def test_existing_index_receives_supplemental_breakdown_instruction(self):
+        with tempfile.TemporaryDirectory() as work_dir:
+            pipeline = BreakPipeline(work_dir)
+            Path(pipeline.requirements_dir).mkdir()
+            Path(pipeline.requirements_index_file).write_text("existing", encoding="utf-8")
+            breaker = MagicMock()
+            reviewer = MagicMock()
+            reviewer.send_message.return_value = "拆分方案通过"
+
+            with patch.object(pipeline, "_create_agent", side_effect=[breaker, reviewer]), \
+                    patch("break_pipeline.human_gate", return_value=None):
+                pipeline._run_breakdown("补充支付失败场景")
+
+        breaker.send_message.assert_called_once()
+        prompt = breaker.send_message.call_args.args[0]
+        self.assertIn("补充支付失败场景", prompt)
+        self.assertIn("保留", prompt)
+
     def test_empty_review_response_is_treated_as_approval(self):
         with tempfile.TemporaryDirectory() as work_dir:
             pipeline = BreakPipeline(work_dir)
@@ -291,6 +325,20 @@ class BreakPipelineTests(unittest.TestCase):
                 pipeline.run()
 
         reflection.assert_not_called()
+
+    def test_run_with_new_user_input_reruns_breakdown_even_after_approval(self):
+        with tempfile.TemporaryDirectory() as work_dir:
+            pipeline = BreakPipeline(work_dir)
+            Path(pipeline.requirements_dir).mkdir()
+            Path(pipeline.requirements_index_file).write_text("existing", encoding="utf-8")
+            Path(pipeline.breakdown_approval_file).write_text("approved\n", encoding="utf-8")
+            with patch.object(pipeline, "_run_breakdown") as breakdown, \
+                    patch.object(pipeline, "_run_execution", return_value=True) as execution, \
+                    patch.object(pipeline, "_run_final_reflection"):
+                pipeline.run("补充需求")
+
+        breakdown.assert_called_once_with("补充需求")
+        execution.assert_called_once_with()
 
     def test_index_rejects_paths_outside_requirements_directory(self):
         with tempfile.TemporaryDirectory() as work_dir:
@@ -412,6 +460,26 @@ class BreakPipelineTests(unittest.TestCase):
 
             self.assertEqual(agents["analyst"].send_message.call_count, 3)
             self.assertIn("补充异常场景", agents["analyst"].send_message.call_args_list[1].args[0])
+
+    def test_item_requirement_review_auto_passes_after_three_failed_agent_reviews(self):
+        with tempfile.TemporaryDirectory() as work_dir:
+            pipeline = BreakPipeline(work_dir)
+            self._write_requirement_files(work_dir, "R-001")
+            self._write_index(work_dir, [(1, "R-001", "待需求分析", "无", "001-first.md")])
+            item = pipeline._load_items()[0]
+            analyst = MagicMock()
+            reviewer = MagicMock()
+            reviewer.send_message.side_effect = ["缺少边界", "缺少异常", "缺少验收"]
+
+            with patch("break_pipeline.human_gate", return_value=None):
+                pipeline._run_item_requirements(item, analyst, reviewer)
+
+            self.assertEqual(reviewer.send_message.call_count, 3)
+            self.assertEqual(analyst.send_message.call_count, 3)
+            self.assertIn("缺少边界", analyst.send_message.call_args_list[1].args[0])
+            self.assertIn("缺少异常", analyst.send_message.call_args_list[2].args[0])
+            plan = json.loads(Path(pipeline.execution_plan_file).read_text(encoding="utf-8"))
+            self.assertEqual(plan["items"][0]["status"], "待实施")
 
     def test_requirement_change_from_code_review_returns_to_requirement_gates(self):
         with tempfile.TemporaryDirectory() as work_dir:

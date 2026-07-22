@@ -83,6 +83,18 @@ class PipelinePathTests(unittest.TestCase):
             agent_type="cursor",
         )
 
+    def test_run_passes_user_idea_into_requirements_stage(self):
+        pipeline = Pipeline("relative-workspace")
+
+        with patch.object(pipeline, "_run_stage_1_requirements") as requirements, \
+                patch.object(pipeline, "_run_stage_2_development") as development, \
+                patch.object(pipeline, "_run_final_reflection") as reflection:
+            pipeline.run("新增后台管理")
+
+        requirements.assert_called_once_with("新增后台管理")
+        development.assert_called_once_with()
+        reflection.assert_called_once_with()
+
     def test_requirements_stage_does_not_create_role_directory(self):
         with tempfile.TemporaryDirectory() as work_dir:
             pipeline = Pipeline(work_dir)
@@ -97,10 +109,9 @@ class PipelinePathTests(unittest.TestCase):
                 return agents[args[0]]
 
             with patch.object(pipeline, "_create_agent", side_effect=create_agent), \
-                    patch("builtins.input", return_value="new project"), \
                     patch("pipeline.human_gate", return_value=None), \
                     patch("pipeline.os.mkdir") as mkdir:
-                pipeline._run_stage_1_requirements()
+                pipeline._run_stage_1_requirements("new project")
 
             self.assertEqual(
                 created,
@@ -110,6 +121,24 @@ class PipelinePathTests(unittest.TestCase):
                 ],
             )
             mkdir.assert_not_called()
+
+    def test_requirement_review_auto_passes_after_three_failed_agent_reviews(self):
+        with tempfile.TemporaryDirectory() as work_dir:
+            pipeline = Pipeline(work_dir)
+            analyst = MagicMock()
+            reviewer = MagicMock()
+            reviewer.send_message.side_effect = ["缺少范围", "仍缺少验收", "还不完整"]
+            agents = {"需求分析": analyst, "需求审查": reviewer}
+
+            with patch.object(pipeline, "_create_agent", side_effect=lambda name, prompt: agents[name]), \
+                    patch("pipeline.human_gate", return_value=None) as gate:
+                pipeline._run_stage_1_requirements("new project")
+
+            self.assertEqual(reviewer.send_message.call_count, 3)
+            self.assertEqual(analyst.send_message.call_count, 3)
+            self.assertIn("缺少范围", analyst.send_message.call_args_list[1].args[0])
+            self.assertIn("仍缺少验收", analyst.send_message.call_args_list[2].args[0])
+            gate.assert_called_once_with("1. 需求分析", pipeline.user_requirements_file, skip_human=False)
 
 
 if __name__ == "__main__":
