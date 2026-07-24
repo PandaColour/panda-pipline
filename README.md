@@ -32,6 +32,14 @@ python main.py --skipHuman
 python break_main.py --skipHuman
 ```
 
+通宵或长时间运行拆分流水线时，macOS 可能睡眠导致进程暂停。仓库提供了通用保活脚本：
+
+```bash
+./run_break_main_awake.sh
+```
+
+脚本会在自身所在仓库目录执行 `caffeinate -dimsu python3 break_main.py --skipHuman`，运行期间阻止系统睡眠，并支持继续追加 `break_main.py` 参数。IntelliJ IDEA 可新建 `Shell Script` Run Configuration，`Script path` 选择 `run_break_main_awake.sh`，`Working directory` 选择本仓库根目录。
+
 ## 欢迎交流学习
 
 欢迎交流学习：panda.colour@qq.com
