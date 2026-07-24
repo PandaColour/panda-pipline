@@ -7,7 +7,7 @@ import subprocess
 
 PROJECT_ROOT = r"/Users/panda.colour/Company/ios2"
 REPOS = [
-    ("https://gitee.com/meiyingda1/ai-test.git", "master")
+    ("https://gitee.com/pandacolour/aiphone.git", "main")
 ]
 DEFAULT_MEMORY_FILENAME = "loan_pipeline_default.md"
 DEFAULT_MEMORY_SOURCE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "default-memory")

@@ -1,6 +1,8 @@
 import os
+import json
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from pipeline import Pipeline
@@ -18,11 +20,15 @@ class PipelinePathTests(unittest.TestCase):
     def test_initializes_full_report_paths(self):
         pipeline = Pipeline("relative-workspace")
         work_dir = os.path.abspath("relative-workspace")
+        requirement_dir = os.path.join(work_dir, "requirements", "R-001-main")
 
         self.assertEqual(pipeline.work_dir, work_dir)
-        self.assertEqual(pipeline.user_requirements_file, os.path.join(work_dir, "user_requirements.md"))
-        self.assertEqual(pipeline.develop_report_file, os.path.join(work_dir, "develop_report.md"))
-        self.assertEqual(pipeline.test_report_file, os.path.join(work_dir, "test_report.md"))
+        self.assertEqual(pipeline.requirements_dir, os.path.join(work_dir, "requirements"))
+        self.assertEqual(pipeline.requirement_dir, requirement_dir)
+        self.assertEqual(pipeline.execution_plan_file, os.path.join(work_dir, "requirements", "execution_plan.json"))
+        self.assertEqual(pipeline.user_requirements_file, os.path.join(requirement_dir, "user_requirements.md"))
+        self.assertEqual(pipeline.develop_report_file, os.path.join(requirement_dir, "develop_report.md"))
+        self.assertEqual(pipeline.test_report_file, os.path.join(requirement_dir, "test_report.md"))
 
     def test_development_prompts_use_full_report_paths(self):
         with tempfile.TemporaryDirectory() as work_dir:
@@ -43,8 +49,7 @@ class PipelinePathTests(unittest.TestCase):
                 return agents[args[0]]
 
             with patch.object(pipeline, "_create_agent", side_effect=create_agent), \
-                    patch("pipeline.human_gate", return_value=None), \
-                    patch("pipeline.os.mkdir") as mkdir:
+                    patch("pipeline.human_gate", return_value=None):
                 pipeline._run_stage_2_development()
 
             self.assertEqual(
@@ -54,7 +59,7 @@ class PipelinePathTests(unittest.TestCase):
                     ("代码验证审查", "code_reviewer.md"),
                 ],
             )
-            mkdir.assert_not_called()
+            self.assertTrue(Path(pipeline.requirement_dir).is_dir())
 
             developer_prompt = developer.send_message.call_args.args[0]
             reviewer_prompt = code_reviewer.send_message.call_args.args[0]
@@ -86,12 +91,19 @@ class PipelinePathTests(unittest.TestCase):
     def test_run_passes_user_idea_into_requirements_stage(self):
         pipeline = Pipeline("relative-workspace")
 
-        with patch.object(pipeline, "_run_stage_1_requirements") as requirements, \
+        with patch.object(pipeline, "_ensure_execution_plan") as ensure_plan, \
+                patch.object(pipeline, "_run_stage_1_requirements") as requirements, \
                 patch.object(pipeline, "_run_stage_2_development") as development, \
-                patch.object(pipeline, "_run_final_reflection") as reflection:
+                patch.object(pipeline, "_run_final_reflection") as reflection, \
+                patch.object(pipeline, "_active_requirements_complete", side_effect=[False, True]), \
+                patch.object(pipeline, "_item_status", side_effect=["需求分析中", "待开发", "记忆整理中"]), \
+                patch.object(pipeline, "_set_demand_status"), \
+                patch.object(pipeline, "_set_status"), \
+                patch.object(pipeline, "_archive_completed_requirements"):
             pipeline.run("新增后台管理")
 
-        requirements.assert_called_once_with("新增后台管理")
+        ensure_plan.assert_called_once_with("新增后台管理")
+        requirements.assert_called_once_with()
         development.assert_called_once_with()
         reflection.assert_called_once_with()
 
@@ -109,8 +121,7 @@ class PipelinePathTests(unittest.TestCase):
                 return agents[args[0]]
 
             with patch.object(pipeline, "_create_agent", side_effect=create_agent), \
-                    patch("pipeline.human_gate", return_value=None), \
-                    patch("pipeline.os.mkdir") as mkdir:
+                    patch("pipeline.human_gate", return_value=None):
                 pipeline._run_stage_1_requirements("new project")
 
             self.assertEqual(
@@ -120,7 +131,7 @@ class PipelinePathTests(unittest.TestCase):
                     ("需求审查", "requirements_reviewer.md"),
                 ],
             )
-            mkdir.assert_not_called()
+            self.assertTrue(Path(pipeline.requirement_dir).is_dir())
 
     def test_requirement_review_auto_passes_after_three_failed_agent_reviews(self):
         with tempfile.TemporaryDirectory() as work_dir:
@@ -139,6 +150,74 @@ class PipelinePathTests(unittest.TestCase):
             self.assertIn("缺少范围", analyst.send_message.call_args_list[1].args[0])
             self.assertIn("仍缺少验收", analyst.send_message.call_args_list[2].args[0])
             gate.assert_called_once_with("1. 需求分析", pipeline.user_requirements_file, skip_human=False)
+
+    def test_ensure_execution_plan_creates_single_requirement_under_requirements(self):
+        with tempfile.TemporaryDirectory() as work_dir:
+            pipeline = Pipeline(work_dir)
+
+            pipeline._ensure_execution_plan("new project")
+
+            self.assertTrue(Path(pipeline.requirements_index_file).is_file())
+            self.assertTrue(Path(pipeline.requirement_dir).is_dir())
+            plan = json.loads(Path(pipeline.execution_plan_file).read_text(encoding="utf-8"))
+            self.assertNotIn("schema_version", plan)
+            self.assertEqual(plan["demand"]["source"], "new project")
+            self.assertEqual(plan["items"][0]["id"], "R-001")
+            self.assertEqual(plan["items"][0]["status"], "需求分析中")
+            self.assertEqual(plan["items"][0]["requirements_file"], "R-001-main/user_requirements.md")
+
+    def test_restart_at_code_review_runs_reviewer_without_rerunning_developer(self):
+        with tempfile.TemporaryDirectory() as work_dir:
+            pipeline = Pipeline(work_dir)
+            pipeline._ensure_execution_plan("new project")
+            pipeline._set_status("代码评审中")
+            developer = MagicMock()
+            code_reviewer = MagicMock()
+            code_reviewer.send_message.return_value = "任务完成"
+            agents = {
+                "代码开发": developer,
+                "代码验证审查": code_reviewer,
+            }
+
+            with patch.object(pipeline, "_create_agent", side_effect=lambda name, prompt: agents[name]), \
+                    patch("pipeline.human_gate", return_value=None):
+                pipeline._run_stage_2_development()
+
+            developer.send_message.assert_not_called()
+            code_reviewer.send_message.assert_called_once()
+            plan = json.loads(Path(pipeline.execution_plan_file).read_text(encoding="utf-8"))
+            self.assertEqual(plan["items"][0]["status"], "记忆整理中")
+
+    def test_run_after_process_restart_resumes_from_execution_plan_status(self):
+        with tempfile.TemporaryDirectory() as work_dir:
+            first = Pipeline(work_dir)
+            first._ensure_execution_plan("new project")
+            first._set_status("代码评审中")
+
+            restarted = Pipeline(work_dir)
+            with patch.object(restarted, "_run_stage_1_requirements") as requirements, \
+                    patch.object(restarted, "_run_stage_2_development") as development, \
+                    patch.object(restarted, "_run_final_reflection") as reflection:
+                restarted.run("new project")
+
+            requirements.assert_not_called()
+            development.assert_called_once_with()
+            reflection.assert_not_called()
+
+    def test_completed_run_archives_requirements_to_next_numbered_directory(self):
+        with tempfile.TemporaryDirectory() as work_dir:
+            pipeline = Pipeline(work_dir)
+            pipeline._ensure_execution_plan("new project")
+            pipeline._set_status("已完成")
+            Path(work_dir, "requirements-001").mkdir()
+
+            with patch.object(pipeline, "_run_stage_1_requirements"), \
+                    patch.object(pipeline, "_run_stage_2_development"), \
+                    patch.object(pipeline, "_run_final_reflection"):
+                pipeline.run("new project")
+
+            self.assertTrue(Path(work_dir, "requirements").exists())
+            self.assertTrue(Path(work_dir, "requirements-002", "execution_plan.json").is_file())
 
     def test_final_reflection_only_asks_fact_producers_to_curate_memory(self):
         with tempfile.TemporaryDirectory() as work_dir:

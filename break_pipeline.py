@@ -16,7 +16,19 @@ BREAKDOWN_APPROVAL = "拆分方案通过"
 ITEM_APPROVAL = "任务完成"
 REQUIREMENTS_APPROVAL = "同意方案"
 MAX_REQUIREMENT_REVIEW_ATTEMPTS = 3
-VALID_STATUSES = {"待审核", "待需求分析", "待需求评审", "需求返工中", "待需求人工确认", "待实施", "开发中", "待人工确认", "待记忆整理", "记忆整理中", "已完成", "返工中", "阻塞"}
+VALID_STATUSES = {
+    "待审核",
+    "需求分析中",
+    "需求评审中",
+    "待需求人工确认",
+    "待开发",
+    "开发中",
+    "代码评审中",
+    "待人工确认",
+    "记忆整理中",
+    "已完成",
+    "阻塞",
+}
 
 
 @dataclass
@@ -79,7 +91,12 @@ class BreakPipeline:
         elif not os.path.isfile(self.breakdown_approval_file):
             self._run_breakdown()
         if self._run_execution():
+            if self._active_requirements_complete():
+                self._set_demand_status("记忆整理中")
             self._run_final_reflection()
+            if self._active_requirements_complete():
+                self._set_demand_status("已完成")
+                self._archive_completed_requirements()
             print("\n🎉🎉🎉 【拆分流水线圆满完成】所有小需求均已通过！")
 
     def _run_breakdown(self, user_idea=None):
@@ -91,12 +108,16 @@ class BreakPipeline:
             user_idea = "已有拆分产物；请在不重置已写内容的前提下完成恢复审查。"
         elif user_idea is None:
             user_idea = input("\n🎯 请输入总体开发需求描述:\n> ")
+            self._set_demand_status("拆分中", source=user_idea)
             breaker.send_message(self._breakdown_instruction(user_idea))
         elif has_existing_index:
+            self._set_demand_status("拆分中", source=user_idea)
             breaker.send_message(self._breakdown_update_instruction(user_idea))
         else:
+            self._set_demand_status("拆分中", source=user_idea)
             breaker.send_message(self._breakdown_instruction(user_idea))
         while True:
+            self._set_demand_status("拆分评审中", source=user_idea)
             for attempt in range(1, MAX_REQUIREMENT_REVIEW_ATTEMPTS + 1):
                 review = reviewer.send_message(
                     f"请审查拆分产物 {self.requirements_index_file} 及目录 {self.requirements_dir}，原始需求：{user_idea}。"
@@ -113,6 +134,7 @@ class BreakPipeline:
                 os.makedirs(self.requirements_dir, exist_ok=True)
                 with open(self.breakdown_approval_file, "w", encoding="utf-8") as approval_file:
                     approval_file.write("approved\n")
+                self._set_demand_status("开发中", source=user_idea)
                 return
             breaker.send_message(f"人工审核意见：{feedback}\n请更新 {self.requirements_dir}，然后等待重新评审。")
 
@@ -134,11 +156,12 @@ class BreakPipeline:
     def _run_execution(self):
         print("\n" + "=" * 60 + "\n💻 阶段 2: 按小需求实施\n" + "=" * 60)
         self._ensure_execution_plan()
+        self._set_demand_status("开发中")
         items = self._load_items()
         self._validate_items(items)
         while item := self._next_runnable_item(items):
             item_agents = self._item_agents(item)
-            if item.status in {"待需求分析", "待需求评审", "需求返工中"}:
+            if item.status in {"需求分析中", "需求评审中"}:
                 self._run_item_requirements(item, item_agents["analyst"], item_agents["requirements_reviewer"])
                 items = self._load_items()
                 self._validate_items(items)
@@ -153,7 +176,7 @@ class BreakPipeline:
                 items = self._load_items()
                 self._validate_items(items)
                 continue
-            if item.status in {"待记忆整理", "记忆整理中"}:
+            if item.status == "记忆整理中":
                 self._run_item_memory(item, item_agents)
                 items = self._load_items()
                 self._validate_items(items)
@@ -179,14 +202,17 @@ class BreakPipeline:
         requirement_file = paths["requirements"]
         analysis_report = paths["requirements_analysis"]
         review_report = paths["requirements_review"]
-        self._set_status(item.requirement_id, "待需求评审")
-        analysis_message = (
-            f"只分析当前需求 {item.requirement_id}。阅读 {requirement_file}，补全范围、影响、边界、异常、验收标准、依赖和风险；将分析结果写入 {analysis_report}，不得覆盖拆分需求文件或修改其他需求。"
-        )
-        feedback = self._pending_requirement_feedback.pop(item.requirement_id, None)
-        if feedback:
-            analysis_message += f"\n需要处理的需求变更意见：{feedback}"
-        analyst.send_message(analysis_message)
+        if item.status != "需求评审中":
+            self._set_status(item.requirement_id, "需求分析中")
+            analysis_message = (
+                f"只分析当前需求 {item.requirement_id}。阅读 {requirement_file}，补全范围、影响、边界、异常、验收标准、依赖和风险；将分析结果写入 {analysis_report}，不得覆盖拆分需求文件或修改其他需求。"
+            )
+            feedback = self._pending_feedback_message(item.requirement_id)
+            if feedback:
+                analysis_message += f"\n需要处理的需求变更意见：{feedback}"
+            analyst.send_message(analysis_message)
+            self._clear_pending_feedback(item.requirement_id)
+            self._set_status(item.requirement_id, "需求评审中")
         while True:
             for attempt in range(1, MAX_REQUIREMENT_REVIEW_ATTEMPTS + 1):
                 review = reviewer.send_message(
@@ -197,21 +223,29 @@ class BreakPipeline:
                 if attempt >= MAX_REQUIREMENT_REVIEW_ATTEMPTS:
                     print(f"⚠️ 小需求 {item.requirement_id} 需求评审连续 3 次未通过，按策略自动进入人工确认。")
                     break
-                self._set_status(item.requirement_id, "需求返工中")
+                self._set_pending_feedback(item.requirement_id, "requirement_review", "需求评审中", review)
+                self._set_status(item.requirement_id, "需求分析中")
                 analyst.send_message(f"当前需求 {item.requirement_id} 的需求评审意见：{review}\n请仅修订当前需求文档。")
-                self._set_status(item.requirement_id, "待需求评审")
+                self._clear_pending_feedback(item.requirement_id)
+                self._set_status(item.requirement_id, "需求评审中")
             self._set_status(item.requirement_id, "待需求人工确认")
             feedback = self._human_gate(f"2. 小需求 {item.requirement_id} 需求分析", analysis_report)
             if feedback is None:
-                self._set_status(item.requirement_id, "待实施")
+                self._set_status(item.requirement_id, "待开发")
                 return
-            self._set_status(item.requirement_id, "需求返工中")
+            self._set_pending_feedback(item.requirement_id, "requirements_human", "待需求人工确认", feedback)
+            self._set_status(item.requirement_id, "需求分析中")
             analyst.send_message(f"当前需求 {item.requirement_id} 的需求人工审核意见：{feedback}\n请仅修订 {analysis_report}。")
-            self._set_status(item.requirement_id, "待需求评审")
+            self._clear_pending_feedback(item.requirement_id)
+            self._set_status(item.requirement_id, "需求评审中")
 
     def _resume_requirements_human_gate(self, item):
         feedback = self._human_gate(f"2. 小需求 {item.requirement_id} 需求分析", self._item_paths(item)["requirements_analysis"])
-        self._set_status(item.requirement_id, "待实施" if feedback is None else "需求返工中")
+        if feedback is None:
+            self._set_status(item.requirement_id, "待开发")
+            return
+        self._set_pending_feedback(item.requirement_id, "requirements_human", "待需求人工确认", feedback)
+        self._set_status(item.requirement_id, "需求分析中")
 
     def _run_item(self, item, developer, reviewer):
         paths = self._item_paths(item)
@@ -221,16 +255,19 @@ class BreakPipeline:
         develop_report = paths["develop"]
         test_report = paths["test"]
         review_report = paths["code_review"]
-        self._set_status(item.requirement_id, "开发中")
-        initial_message = (
-            f"只实现当前需求 {item.requirement_id}。阅读 {requirement_file} 和 {analysis_report}。"
-            f"允许进行必要自测，并将自测命令和结果写入 {develop_report}。完成后写 {develop_report}。"
-            "不得实现其他需求，也不要修改 requirements/index.md。"
-        )
-        feedback = self._pending_human_feedback.pop(item.requirement_id, None)
-        if feedback:
-            initial_message += f"\n上次人工审核意见：{feedback}\n请仅修正当前项。"
-        developer.send_message(initial_message)
+        if item.status != "代码评审中":
+            self._set_status(item.requirement_id, "开发中")
+            initial_message = (
+                f"只实现当前需求 {item.requirement_id}。阅读 {requirement_file} 和 {analysis_report}。"
+                f"允许进行必要自测，并将自测命令和结果写入 {develop_report}。完成后写 {develop_report}。"
+                "不得实现其他需求，也不要修改 requirements/index.md。"
+            )
+            feedback = self._pending_feedback_message(item.requirement_id)
+            if feedback:
+                initial_message += f"\n上次反馈意见：{feedback}\n请仅修正当前项。"
+            developer.send_message(initial_message)
+            self._clear_pending_feedback(item.requirement_id)
+            self._set_status(item.requirement_id, "代码评审中")
         while True:
             review = reviewer.send_message(
                 f"只验证并审查当前需求 {item.requirement_id}。阅读 {requirement_file}、{analysis_report}、{develop_report}、当前代码和测试。"
@@ -238,36 +275,43 @@ class BreakPipeline:
                 f"将审查结论写入 {review_report}。通过时在 FINAL_ANSWER JSON 中输出 status=approved 且 approval_token={ITEM_APPROVAL}；否则输出 changes_requested 和当前项的具体修改意见。"
             )
             if self._is_requirement_change(review):
-                self._set_status(item.requirement_id, "待需求分析")
-                self._pending_requirement_feedback[item.requirement_id] = review
+                self._set_pending_feedback(item.requirement_id, "requirement_change", "代码评审中", review)
+                self._set_status(item.requirement_id, "需求分析中")
                 return
             if not self._review_passed(review, ITEM_APPROVAL):
+                self._set_pending_feedback(item.requirement_id, "code_review", "代码评审中", review)
+                self._set_status(item.requirement_id, "开发中")
                 developer.send_message(f"当前需求 {item.requirement_id} 的代码审查意见：{review}\n请仅修正当前项。")
+                self._clear_pending_feedback(item.requirement_id)
+                self._set_status(item.requirement_id, "代码评审中")
                 continue
             self._set_status(item.requirement_id, "待人工确认")
             feedback = self._human_gate(f"2. 小需求 {item.requirement_id}", requirement_file)
             if feedback is None:
-                self._set_status(item.requirement_id, "待记忆整理")
+                self._set_status(item.requirement_id, "记忆整理中")
                 return
             if self._is_requirement_change(feedback):
-                self._set_status(item.requirement_id, "待需求分析")
-                self._pending_requirement_feedback[item.requirement_id] = feedback
+                self._set_pending_feedback(item.requirement_id, "human_requirement_change", "待人工确认", feedback)
+                self._set_status(item.requirement_id, "需求分析中")
                 return
-            self._set_status(item.requirement_id, "返工中")
+            self._set_pending_feedback(item.requirement_id, "human", "待人工确认", feedback)
+            self._set_status(item.requirement_id, "开发中")
             developer.send_message(f"当前需求 {item.requirement_id} 的人工审核意见：{feedback}\n请仅修正当前项。")
+            self._clear_pending_feedback(item.requirement_id)
+            self._set_status(item.requirement_id, "代码评审中")
 
     def _resume_human_gate(self, item):
         requirement_file = self._item_paths(item)["requirements"]
         feedback = self._human_gate(f"2. 小需求 {item.requirement_id}", requirement_file)
         if feedback is None:
-            self._set_status(item.requirement_id, "待记忆整理")
+            self._set_status(item.requirement_id, "记忆整理中")
             return
         if self._is_requirement_change(feedback):
-            self._set_status(item.requirement_id, "待需求分析")
-            self._pending_requirement_feedback[item.requirement_id] = feedback
+            self._set_pending_feedback(item.requirement_id, "human_requirement_change", "待人工确认", feedback)
+            self._set_status(item.requirement_id, "需求分析中")
         else:
-            self._set_status(item.requirement_id, "返工中")
-            self._pending_human_feedback[item.requirement_id] = feedback
+            self._set_pending_feedback(item.requirement_id, "human", "待人工确认", feedback)
+            self._set_status(item.requirement_id, "开发中")
 
     def _run_item_memory(self, item, item_agents):
         paths = self._item_paths(item)
@@ -328,7 +372,7 @@ class BreakPipeline:
     def _load_items(self):
         self._ensure_execution_plan()
         plan = self.execution_plan.read()
-        statuses_changed = self.execution_plan.normalize_statuses(plan, VALID_STATUSES)
+        statuses_changed = self.execution_plan.normalize_plan(plan, VALID_STATUSES)
         self.execution_plan.validate(plan, VALID_STATUSES, self.execution_plan.index_hash())
         if statuses_changed:
             self.execution_plan.write(plan)
@@ -360,7 +404,7 @@ class BreakPipeline:
             if isinstance(normalizer_response, str) and normalizer_response.strip():
                 raise ValueError(f"执行索引规范化未生成计划：{normalizer_response.strip()}") from error
             raise
-        statuses_changed = self.execution_plan.normalize_statuses(plan, VALID_STATUSES)
+        statuses_changed = self.execution_plan.normalize_plan(plan, VALID_STATUSES)
         self.execution_plan.validate(plan, VALID_STATUSES, expected_source_hash=source_hash)
         self._validate_items_from_plan(plan)
         preserve_changed = previous_plan is not None and self._preserve_unchanged_statuses(previous_plan, plan)
@@ -370,7 +414,7 @@ class BreakPipeline:
     def _valid_previous_plan(self):
         try:
             plan = self.execution_plan.read()
-            self.execution_plan.normalize_statuses(plan, VALID_STATUSES)
+            self.execution_plan.normalize_plan(plan, VALID_STATUSES)
             self.execution_plan.validate(plan, VALID_STATUSES)
             self._validate_items_from_plan(plan)
         except ValueError:
@@ -379,15 +423,20 @@ class BreakPipeline:
 
     @staticmethod
     def _preserve_unchanged_statuses(previous_plan, plan):
-        previous_statuses = {
-            BreakPipeline._item_identity(item): item["status"]
+        previous_items = {
+            BreakPipeline._item_identity(item): item
             for item in previous_plan["items"]
         }
         changed = False
         for item in plan["items"]:
-            previous_status = previous_statuses.get(BreakPipeline._item_identity(item))
-            if previous_status is not None and item["status"] != previous_status:
-                item["status"] = previous_status
+            previous_item = previous_items.get(BreakPipeline._item_identity(item))
+            if previous_item is None:
+                continue
+            if item["status"] != previous_item["status"]:
+                item["status"] = previous_item["status"]
+                changed = True
+            if item.get("pending_feedback") != previous_item.get("pending_feedback"):
+                item["pending_feedback"] = previous_item.get("pending_feedback")
                 changed = True
         return changed
 
@@ -452,14 +501,32 @@ class BreakPipeline:
     def _next_runnable_item(items):
         completed = {item.requirement_id for item in items if item.status == "已完成"}
         for item in items:
-            if item.status in {"待需求分析", "待需求评审", "需求返工中", "待需求人工确认", "待实施", "返工中", "开发中", "待人工确认", "待记忆整理", "记忆整理中"} and set(item.dependencies) <= completed:
+            if item.status in {
+                "需求分析中",
+                "需求评审中",
+                "待需求人工确认",
+                "待开发",
+                "开发中",
+                "代码评审中",
+                "待人工确认",
+                "记忆整理中",
+            } and set(item.dependencies) <= completed:
                 return item
         return None
 
     def _mark_blocked_items(self, items):
         completed = {item.requirement_id for item in items if item.status == "已完成"}
         for item in items:
-            if item.status in {"待实施", "返工中"} and not set(item.dependencies) <= completed:
+            if item.status in {
+                "需求分析中",
+                "需求评审中",
+                "待需求人工确认",
+                "待开发",
+                "开发中",
+                "代码评审中",
+                "待人工确认",
+                "记忆整理中",
+            } and not set(item.dependencies) <= completed:
                 self._set_status(item.requirement_id, "阻塞")
 
     @staticmethod
@@ -494,6 +561,50 @@ class BreakPipeline:
             VALID_STATUSES,
             expected_source_hash=self.execution_plan.index_hash(),
         )
+
+    def _set_demand_status(self, status, source=None):
+        self.execution_plan.set_demand_status(status, source=source)
+
+    def _set_pending_feedback(self, requirement_id, kind, source_status, message):
+        self.execution_plan.set_pending_feedback(
+            requirement_id,
+            kind=kind,
+            source_status=source_status,
+            message=message,
+        )
+
+    def _clear_pending_feedback(self, requirement_id):
+        self.execution_plan.clear_pending_feedback(requirement_id)
+
+    def _pending_feedback_message(self, requirement_id):
+        feedback = self.execution_plan.get_pending_feedback(requirement_id)
+        if isinstance(feedback, dict):
+            return feedback.get("message")
+        return None
+
+    def _active_requirements_complete(self):
+        try:
+            plan = self.execution_plan.read()
+            self.execution_plan.normalize_plan(plan, VALID_STATUSES)
+            self.execution_plan.validate(plan, VALID_STATUSES, self.execution_plan.index_hash())
+        except ValueError:
+            return False
+        return bool(plan["items"]) and all(item["status"] == "已完成" for item in plan["items"])
+
+    def _archive_completed_requirements(self):
+        if not os.path.isdir(self.requirements_dir):
+            return None
+        archive_dir = self._next_requirements_archive_dir()
+        os.rename(self.requirements_dir, archive_dir)
+        return archive_dir
+
+    def _next_requirements_archive_dir(self):
+        index = 1
+        while True:
+            candidate = os.path.join(self.work_dir, f"requirements-{index:03d}")
+            if not os.path.exists(candidate):
+                return candidate
+            index += 1
 
     def _run_final_reflection(self):
         breaker = self.agents.get("需求拆分")

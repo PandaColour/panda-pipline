@@ -45,6 +45,16 @@ class BreakExecutionPlanTests(unittest.TestCase):
             }],
         }
 
+    def _demand_plan(self, status="待开发", demand_status="开发中"):
+        plan = self._plan(status=status)
+        plan.pop("schema_version")
+        plan["demand"] = {
+            "id": "D-001",
+            "status": demand_status,
+            "source": "登录需求",
+        }
+        return plan
+
     def _write_plan(self, plan):
         Path(self.pipeline.execution_plan_file).write_text(
             json.dumps(plan, ensure_ascii=False), encoding="utf-8"
@@ -56,6 +66,58 @@ class BreakExecutionPlanTests(unittest.TestCase):
         items = self.pipeline._load_items()
 
         self.assertEqual([item.requirement_id for item in items], ["R-001"])
+
+    def test_demand_aware_plan_without_schema_version_loads(self):
+        self._write_plan(self._demand_plan())
+
+        items = self.pipeline._load_items()
+
+        saved_plan = json.loads(Path(self.pipeline.execution_plan_file).read_text(encoding="utf-8"))
+        self.assertEqual(items[0].status, "待开发")
+        self.assertNotIn("schema_version", saved_plan)
+        self.assertEqual(saved_plan["demand"]["status"], "开发中")
+
+    def test_legacy_plan_is_normalized_to_demand_aware_plan_without_schema_version(self):
+        self._write_plan(self._plan(status="待实施"))
+
+        self.pipeline._load_items()
+
+        saved_plan = json.loads(Path(self.pipeline.execution_plan_file).read_text(encoding="utf-8"))
+        self.assertNotIn("schema_version", saved_plan)
+        self.assertEqual(saved_plan["demand"], {"id": "D-001", "status": "开发中", "source": ""})
+        self.assertEqual(saved_plan["items"][0]["status"], "待开发")
+        self.assertIsNone(saved_plan["items"][0]["pending_feedback"])
+
+    def test_invalid_demand_status_is_rejected(self):
+        self._write_plan(self._demand_plan(demand_status="随便写"))
+
+        with patch.object(self.pipeline, "_create_agent", side_effect=AssertionError("normalizer should not run")), \
+                self.assertRaisesRegex(ValueError, "未知需求整体状态"):
+            self.pipeline._load_items()
+
+    def test_persists_demand_status_and_item_pending_feedback(self):
+        self._write_plan(self._demand_plan())
+
+        self.pipeline.execution_plan.set_demand_status("记忆整理中")
+        self.pipeline.execution_plan.set_pending_feedback(
+            "R-001",
+            kind="code_review",
+            source_status="代码评审中",
+            message="补充失败场景",
+        )
+
+        saved_plan = json.loads(Path(self.pipeline.execution_plan_file).read_text(encoding="utf-8"))
+        self.assertEqual(saved_plan["demand"]["status"], "记忆整理中")
+        self.assertEqual(saved_plan["items"][0]["pending_feedback"], {
+            "kind": "code_review",
+            "source_status": "代码评审中",
+            "message": "补充失败场景",
+        })
+
+        self.pipeline.execution_plan.clear_pending_feedback("R-001")
+
+        saved_plan = json.loads(Path(self.pipeline.execution_plan_file).read_text(encoding="utf-8"))
+        self.assertIsNone(saved_plan["items"][0]["pending_feedback"])
 
     def test_load_items_normalizes_blocking_synonym_status(self):
         self._write_plan(self._plan(status="阻断（待外部契约）"))
@@ -161,6 +223,24 @@ class BreakExecutionPlanTests(unittest.TestCase):
             items = self.pipeline._load_items()
 
         self.assertEqual(items[0].status, "已完成")
+
+    def test_renormalization_preserves_pending_feedback_for_unchanged_item(self):
+        self._write_plan(self._demand_plan(status="开发中"))
+        self.pipeline.execution_plan.set_pending_feedback(
+            "R-001",
+            kind="human",
+            source_status="待人工确认",
+            message="保留这条反馈",
+        )
+        self.index_file.write_text("# 仅修改说明文字\\n", encoding="utf-8")
+        normalizer = MagicMock()
+        normalizer.send_message.side_effect = lambda _message: self._write_plan(self._demand_plan(status="待开发"))
+
+        with patch.object(self.pipeline, "_create_agent", return_value=normalizer):
+            self.pipeline._load_items()
+
+        saved_plan = json.loads(Path(self.pipeline.execution_plan_file).read_text(encoding="utf-8"))
+        self.assertEqual(saved_plan["items"][0]["pending_feedback"]["message"], "保留这条反馈")
 
     def test_load_items_rejects_non_string_dependency_with_value_error(self):
         plan = self._plan()

@@ -51,7 +51,7 @@ class BreakPipelineTests(unittest.TestCase):
 
     def test_memory_status_is_runnable(self):
         pipeline = BreakPipeline("workspace")
-        item = RequirementItem(1, "R-001", "login", "待记忆整理", [], "R-001-login/user_requirements.md", "ok")
+        item = RequirementItem(1, "R-001", "login", "记忆整理中", [], "R-001-login/user_requirements.md", "ok")
 
         self.assertIs(pipeline._next_runnable_item([item]), item)
 
@@ -388,6 +388,20 @@ class BreakPipelineTests(unittest.TestCase):
         breakdown.assert_not_called()
         execution.assert_called_once_with()
 
+    def test_completed_run_archives_requirements_to_next_numbered_directory(self):
+        with tempfile.TemporaryDirectory() as work_dir:
+            pipeline = BreakPipeline(work_dir)
+            self._write_requirement_files(work_dir, "R-001")
+            self._write_index(work_dir, [(1, "R-001", "已完成", "无", "001-first.md")])
+            Path(work_dir, "requirements-001").mkdir()
+            Path(pipeline.breakdown_approval_file).write_text("approved\n", encoding="utf-8")
+
+            with patch.object(pipeline, "_run_final_reflection"):
+                pipeline.run()
+
+            self.assertFalse(Path(work_dir, "requirements").exists())
+            self.assertTrue(Path(work_dir, "requirements-002", "index.md").is_file())
+
     def test_existing_unapproved_index_returns_to_breakdown_review(self):
         with tempfile.TemporaryDirectory() as work_dir:
             pipeline = BreakPipeline(work_dir)
@@ -430,6 +444,48 @@ class BreakPipelineTests(unittest.TestCase):
             self.assertIn("memory_report.md", agents["developer"].send_message.call_args.args[0])
             plan = json.loads(Path(pipeline.execution_plan_file).read_text(encoding="utf-8"))
             self.assertEqual(plan["items"][0]["status"], "已完成")
+
+    def test_restart_at_code_review_runs_reviewer_without_rerunning_developer(self):
+        with tempfile.TemporaryDirectory() as work_dir:
+            pipeline = BreakPipeline(work_dir)
+            self._write_requirement_files(work_dir, "R-001")
+            self._write_index(work_dir, [(1, "R-001", "代码评审中", "无", "001-first.md")])
+            agents = self._item_agent_set()
+            agents["code_reviewer"].send_message.return_value = "任务完成"
+
+            with patch.object(pipeline, "_item_agents", return_value=agents), \
+                    patch("break_pipeline.human_gate", return_value=None):
+                pipeline._run_execution()
+
+            self.assertEqual(agents["code_reviewer"].send_message.call_count, 1)
+            self.assertEqual(agents["developer"].send_message.call_count, 1)
+            self.assertIn("memory_report.md", agents["developer"].send_message.call_args.args[0])
+            self.assertNotIn("只实现当前需求", agents["developer"].send_message.call_args.args[0])
+
+    def test_pending_human_feedback_survives_pipeline_restart(self):
+        with tempfile.TemporaryDirectory() as work_dir:
+            pipeline = BreakPipeline(work_dir)
+            self._write_requirement_files(work_dir, "R-001")
+            self._write_index(work_dir, [(1, "R-001", "待人工确认", "无", "001-first.md")])
+
+            with patch("break_pipeline.human_gate", return_value="修正 R-001"):
+                pipeline._resume_human_gate(pipeline._load_items()[0])
+
+            saved_plan = json.loads(Path(pipeline.execution_plan_file).read_text(encoding="utf-8"))
+            self.assertEqual(saved_plan["items"][0]["status"], "开发中")
+            self.assertEqual(saved_plan["items"][0]["pending_feedback"]["message"], "修正 R-001")
+
+            restarted = BreakPipeline(work_dir)
+            agents = self._item_agent_set()
+            agents["code_reviewer"].send_message.return_value = "任务完成"
+
+            with patch.object(restarted, "_item_agents", return_value=agents), \
+                    patch("break_pipeline.human_gate", return_value=None):
+                restarted._run_execution()
+
+            self.assertIn("修正 R-001", agents["developer"].send_message.call_args_list[0].args[0])
+            saved_plan = json.loads(Path(restarted.execution_plan_file).read_text(encoding="utf-8"))
+            self.assertIsNone(saved_plan["items"][0]["pending_feedback"])
 
     def test_item_requirement_gates_run_before_development(self):
         with tempfile.TemporaryDirectory() as work_dir:
@@ -482,7 +538,7 @@ class BreakPipelineTests(unittest.TestCase):
             self.assertIn("缺少边界", analyst.send_message.call_args_list[1].args[0])
             self.assertIn("缺少异常", analyst.send_message.call_args_list[2].args[0])
             plan = json.loads(Path(pipeline.execution_plan_file).read_text(encoding="utf-8"))
-            self.assertEqual(plan["items"][0]["status"], "待实施")
+            self.assertEqual(plan["items"][0]["status"], "待开发")
 
     def test_requirement_change_from_code_review_returns_to_requirement_gates(self):
         with tempfile.TemporaryDirectory() as work_dir:
