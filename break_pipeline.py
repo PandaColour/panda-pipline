@@ -1,6 +1,8 @@
 """Large-requirement breakdown and per-item delivery workflow."""
 
+import ntpath
 import os
+import posixpath
 from dataclasses import dataclass
 
 from agents import Agent
@@ -422,12 +424,18 @@ class BreakPipeline:
             orders.add(item.order)
             if item.status not in VALID_STATUSES:
                 raise ValueError(f"未知需求状态: {item.status}")
-            if os.path.isabs(item.filename) or os.path.normpath(item.filename) != item.filename:
+            if (
+                    os.path.isabs(item.filename)
+                    or ntpath.isabs(item.filename)
+                    or posixpath.isabs(item.filename)
+                    or "\\" in item.filename
+                    or posixpath.normpath(item.filename) != item.filename
+            ):
                 raise ValueError("需求文件必须使用 requirements 下的规范相对路径。")
             requirement_path = os.path.abspath(os.path.join(self.requirements_dir, item.filename))
             if os.path.commonpath([self.requirements_dir, requirement_path]) != self.requirements_dir:
                 raise ValueError("需求文件必须位于 requirements 目录。")
-            if os.path.basename(item.filename) != "user_requirements.md" or os.path.dirname(item.filename) in {"", "."}:
+            if posixpath.basename(item.filename) != "user_requirements.md" or posixpath.dirname(item.filename) in {"", "."}:
                 raise ValueError("需求文件必须是独立小需求目录中的 user_requirements.md。")
             if item.filename in filenames:
                 raise ValueError(f"重复需求文件: {item.filename}")
