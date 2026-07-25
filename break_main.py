@@ -1,6 +1,7 @@
 """Entry point for the large-requirement breakdown workflow."""
 
 import argparse
+import os
 import sys
 
 from break_pipeline import BreakPipeline
@@ -36,12 +37,29 @@ def main(argv=None):
     work_dir = setup_environment()
     print(f"✅ Break Pipeline 工作目录: {work_dir}")
     pipeline_options = {"skip_human": True} if args.skipHuman else {}
+    pipeline = None
     first_round = True
+    requirements_dir = os.path.join(work_dir, "requirements")
+    resume_artifacts = (
+        os.path.join(requirements_dir, "index.md"),
+        os.path.join(requirements_dir, "execution_plan.json"),
+        os.path.join(requirements_dir, ".breakdown-approved"),
+    )
+    if any(os.path.isfile(path) for path in resume_artifacts):
+        pipeline = BreakPipeline(work_dir, **pipeline_options)
+        if pipeline.has_resumable_state():
+            pipeline.run(None)
+            first_round = False
+        else:
+            pipeline = None
     while True:
         user_idea = _read_user_requirement(first_round)
         if user_idea is None:
             break
-        BreakPipeline(work_dir, **pipeline_options).run(user_idea)
+        if pipeline is None:
+            pipeline = BreakPipeline(work_dir, **pipeline_options)
+        pipeline.run(user_idea)
+        pipeline = None
         first_round = False
 
 

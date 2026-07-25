@@ -44,12 +44,24 @@ def main(argv=None):
     work_dir = setup_environment()
     print(f"✅ Agent 工作目录: {work_dir}")
     pipeline_options = {"skip_human": True} if args.skipHuman else {}
+    pipeline = None
     first_round = True
+    execution_plan_file = os.path.join(work_dir, "requirements", "execution_plan.json")
+    if os.path.isfile(execution_plan_file):
+        pipeline = Pipeline(work_dir, **pipeline_options)
+        if pipeline.has_resumable_state():
+            pipeline.run(None)
+            first_round = False
+        else:
+            pipeline = None
     while True:
         user_idea = _read_user_requirement(first_round)
         if user_idea is None:
             break
-        Pipeline(work_dir, **pipeline_options).run(user_idea)
+        if pipeline is None:
+            pipeline = Pipeline(work_dir, **pipeline_options)
+        pipeline.run(user_idea)
+        pipeline = None
         first_round = False
 
 

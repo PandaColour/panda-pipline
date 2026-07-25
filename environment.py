@@ -5,7 +5,7 @@ import shutil
 import subprocess
 
 
-PROJECT_ROOT = r"/Users/panda.colour/Company/ios2"
+PROJECT_ROOT = r"/Users/panda.colour/Company/ios3"
 REPOS = [
     ("https://gitee.com/pandacolour/aiphone.git", "main")
 ]

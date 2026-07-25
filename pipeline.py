@@ -45,6 +45,12 @@ class Pipeline:
     def _human_gate(self, stage_name, review_file_path=None):
         return human_gate(stage_name, review_file_path, skip_human=self.skip_human)
 
+    def has_resumable_state(self):
+        plan = self._valid_existing_plan()
+        if plan is None:
+            return False
+        return plan["items"][0]["status"] != "已完成"
+
     def _create_agent(self, name, prompt_file):
         agent = Agent(
             name,

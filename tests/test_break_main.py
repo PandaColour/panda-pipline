@@ -61,6 +61,36 @@ class BreakMainTests(unittest.TestCase):
             [call("第一个大需求"), call("补充拆分说明")],
         )
 
+    @patch("break_main.BreakPipeline")
+    @patch("break_main.setup_environment", return_value="/tmp/target")
+    @patch("break_main.os.path.isfile", return_value=True)
+    def test_break_main_resumes_before_prompting_when_state_exists(self, isfile, setup_environment, pipeline_class):
+        pipeline_class.return_value.has_resumable_state.return_value = True
+
+        with patch("builtins.input", side_effect=["新的大需求", "q"]):
+            break_main.main()
+
+        self.assertEqual(
+            pipeline_class.return_value.run.call_args_list,
+            [call(None), call("新的大需求")],
+        )
+
+
+class NormalMainRestartTests(unittest.TestCase):
+    @patch("main.Pipeline")
+    @patch("main.setup_environment", return_value="/tmp/target")
+    @patch("main.os.path.isfile", return_value=True)
+    def test_main_resumes_before_prompting_when_state_exists(self, isfile, setup_environment, pipeline_class):
+        pipeline_class.return_value.has_resumable_state.return_value = True
+
+        with patch("builtins.input", side_effect=["新的需求", "q"]):
+            normal_main.main()
+
+        self.assertEqual(
+            pipeline_class.return_value.run.call_args_list,
+            [call(None), call("新的需求")],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
