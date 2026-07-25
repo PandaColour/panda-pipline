@@ -63,7 +63,7 @@ class BreakPipeline:
         return human_gate(stage_name, review_file_path, skip_human=self.skip_human)
 
     def _create_agent(self, name, prompt_file):
-        agent = Agent(name, prompt_file, self.work_dir, add_dirs=None, agent_type="cursor", prompt_dir=self.prompt_dir)
+        agent = Agent(name, prompt_file, self.work_dir, add_dirs=None, agent_type="codex", prompt_dir=self.prompt_dir)
         self.agents[name] = agent
         return agent
 

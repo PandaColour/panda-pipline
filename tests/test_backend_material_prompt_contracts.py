@@ -55,6 +55,18 @@ class BackendMaterialPromptContractTests(unittest.TestCase):
             self.assertIn("接口连通性验证", content, prompt_file.name)
             self.assertIn("无法验证", content, prompt_file.name)
 
+    def test_ui_requirement_analysis_prompts_require_figma_reference_screens_and_visual_baseline(self):
+        prompt_files = [
+            ROOT / "system-prompt" / "requirements_analyst.md",
+            ROOT / "break-system-prompt" / "item_requirements_analyst.md",
+        ]
+        for prompt_file in prompt_files:
+            content = prompt_file.read_text(encoding="utf-8")
+            self.assertIn("reference_screens", content, prompt_file.name)
+            self.assertIn("视觉基准", content, prompt_file.name)
+            self.assertIn("图标尺寸", content, prompt_file.name)
+            self.assertIn("无法获取参考图", content, prompt_file.name)
+
     def test_developer_prompts_require_backend_mock_disclosure_and_human_todo(self):
         for prompt_file in DEVELOPER_PROMPTS:
             content = prompt_file.read_text(encoding="utf-8")
@@ -127,6 +139,19 @@ class BackendMaterialPromptContractTests(unittest.TestCase):
             self.assertIn("验证审查 Agent", content, prompt_file.name)
             self.assertIn("写入 `test_report.md`", content, prompt_file.name)
             self.assertIn("执行必要测试", content, prompt_file.name)
+
+    def test_ui_code_review_prompts_require_implementation_screenshot_comparison(self):
+        prompt_files = [
+            ROOT / "system-prompt" / "code_reviewer.md",
+            ROOT / "break-system-prompt" / "item_code_reviewer.md",
+        ]
+        for prompt_file in prompt_files:
+            content = prompt_file.read_text(encoding="utf-8")
+            self.assertIn("actual_screens", content, prompt_file.name)
+            self.assertIn("视觉对比表", content, prompt_file.name)
+            self.assertIn("图标尺寸", content, prompt_file.name)
+            self.assertIn("静态验证", content, prompt_file.name)
+            self.assertIn("环境阻塞", content, prompt_file.name)
 
     def test_memory_writer_prompts_define_memory_routing(self):
         for prompt_file in MEMORY_WRITER_PROMPTS:
