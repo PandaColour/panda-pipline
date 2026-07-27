@@ -119,6 +119,15 @@ class BackendMaterialPromptContractTests(unittest.TestCase):
             self.assertIn("缺少后端不可用原因、mock 方法/位置/范围或 TODO", content, prompt_file.name)
             self.assertIn("TODO：请人类使用者尽快补充后端接口信息并完善代码", content, prompt_file.name)
 
+    def test_code_review_prompts_require_mock_network_tests_when_credentials_or_network_block_real_validation(self):
+        for prompt_file in CODE_REVIEW_PROMPTS:
+            content = prompt_file.read_text(encoding="utf-8")
+            self.assertIn("测试账号", content, prompt_file.name)
+            self.assertIn("网络环境", content, prompt_file.name)
+            self.assertIn("mock 网络请求", content, prompt_file.name)
+            self.assertIn("开发测试验证", content, prompt_file.name)
+            self.assertIn("不得通过", content, prompt_file.name)
+
     def test_review_prompts_allow_evidence_based_inference_without_fabrication(self):
         for prompt_file in REVIEW_PROMPTS:
             content = prompt_file.read_text(encoding="utf-8")
