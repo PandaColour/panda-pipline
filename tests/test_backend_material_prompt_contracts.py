@@ -81,6 +81,19 @@ class BackendMaterialPromptContractTests(unittest.TestCase):
             self.assertIn("优先检索仓库既有接口封装、服务调用、API 客户端、路由和配置", content, prompt_file.name)
             self.assertIn("不得直接判定为无接口或自行 mock", content, prompt_file.name)
 
+    def test_item_prompts_keep_original_context_and_test_credentials_visible(self):
+        prompt_files = [
+            ROOT / "break-system-prompt" / "requirement_breaker.md",
+            ROOT / "break-system-prompt" / "requirement_break_reviewer.md",
+            ROOT / "break-system-prompt" / "item_requirements_analyst.md",
+            ROOT / "break-system-prompt" / "item_developer.md",
+        ]
+        for prompt_file in prompt_files:
+            content = prompt_file.read_text(encoding="utf-8")
+            self.assertIn("全局上下文", content, prompt_file.name)
+            self.assertIn("测试环境、账号、密码", content, prompt_file.name)
+            self.assertIn("原始需求", content, prompt_file.name)
+
     def test_developer_prompts_require_disclosure_for_requirement_gaps(self):
         for prompt_file in DEVELOPER_PROMPTS:
             content = prompt_file.read_text(encoding="utf-8")

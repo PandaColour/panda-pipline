@@ -223,6 +223,16 @@ class BreakPipelineTests(unittest.TestCase):
         self.assertIn("补充支付失败场景", prompt)
         self.assertIn("保留", prompt)
 
+    def test_breakdown_instruction_requires_global_context_in_each_item(self):
+        pipeline = BreakPipeline("workspace")
+
+        prompt = pipeline._breakdown_instruction("客户要做登录；测试账号 alice，密码 secret")
+
+        self.assertIn("全局上下文", prompt)
+        self.assertIn("每个小需求", prompt)
+        self.assertIn("测试环境、账号、密码", prompt)
+        self.assertIn("原始需求", prompt)
+
     def test_empty_review_response_is_treated_as_approval(self):
         with tempfile.TemporaryDirectory() as work_dir:
             pipeline = BreakPipeline(work_dir)

@@ -152,7 +152,11 @@ class BreakPipeline:
         return (
             f"请将以下大需求拆分为简单、可实现、可验证且有依赖顺序的小需求。"
             f"创建 {self.requirements_index_file} 及 {self.requirements_dir}/001-<short-name>.md 等独立文件；"
-            f"必须写入状态、前置依赖、范围、验收标准、风险。返回前确认文件存在。原始需求：{user_idea}"
+            "必须写入状态、前置依赖、范围、验收标准、风险。"
+            "每个小需求的 `user_requirements.md` 都必须包含“全局上下文”小节，"
+            "传递客户原始需求摘要、适用业务场景、测试环境、账号、密码、凭据、接口地址、物料/Figma 等跨需求信息；"
+            "测试环境、账号、密码等验证信息必须从原始需求保留到需要联调或验证的小需求中，不得只放在父需求或索引里。"
+            f"返回前确认文件存在。原始需求：{user_idea}"
         )
 
     def _breakdown_update_instruction(self, user_idea):
@@ -160,6 +164,8 @@ class BreakPipeline:
             f"收到新的需求或补充说明：{user_idea}。"
             f"请阅读并保留现有拆分产物 {self.requirements_index_file} 及 {self.requirements_dir} 下各需求文件，"
             f"只做与本次输入相关的增量调整；必要时新增、拆分或更新小需求，并保持依赖顺序、状态、范围、验收标准和风险一致。"
+            "若补充说明包含客户原始需求、测试环境、账号、密码、凭据、接口地址、物料/Figma 等跨需求信息，"
+            "必须同步更新每个受影响小需求 `user_requirements.md` 的“全局上下文”小节，不得只写在索引或父级说明中。"
             f"返回前确认 {self.requirements_index_file} 和相关需求文件已更新。"
         )
 
