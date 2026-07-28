@@ -127,6 +127,51 @@ class ExecutionPlanStore:
                 return item.get("pending_feedback")
         raise ValueError(f"找不到需求 ID: {requirement_id}")
 
+    def set_agent_session(self, agent_name, *, session_id, prompt_file, agent_type, requirement_id=None):
+        if not isinstance(agent_name, str) or not agent_name.strip():
+            raise ValueError("Agent 名称无效。")
+        if not isinstance(session_id, str) or not session_id.strip():
+            raise ValueError("Agent session_id 无效。")
+        plan = self.read()
+        self.normalize_plan(plan, None)
+        target = self._agent_session_target(plan, requirement_id)
+        sessions = target.setdefault("agent_sessions", {})
+        sessions[agent_name] = {
+            "session_id": session_id,
+            "prompt_file": prompt_file,
+            "agent_type": agent_type,
+        }
+        self.write(plan)
+
+    def get_agent_session(self, agent_name, *, requirement_id=None):
+        plan = self.read()
+        self.normalize_plan(plan, None)
+        targets = []
+        if requirement_id:
+            targets.append(self._agent_session_target(plan, requirement_id))
+        targets.append(plan.get("demand", {}))
+        if not requirement_id:
+            targets.extend(item for item in plan.get("items", []) if isinstance(item, dict))
+        for target in targets:
+            sessions = target.get("agent_sessions") if isinstance(target, dict) else None
+            if not isinstance(sessions, dict):
+                continue
+            record = sessions.get(agent_name)
+            if isinstance(record, str):
+                return record
+            if isinstance(record, dict) and isinstance(record.get("session_id"), str):
+                return record["session_id"]
+        return None
+
+    @staticmethod
+    def _agent_session_target(plan, requirement_id=None):
+        if requirement_id is None:
+            return plan["demand"]
+        for item in plan.get("items", []):
+            if isinstance(item, dict) and item.get("id") == requirement_id:
+                return item
+        raise ValueError(f"找不到需求 ID: {requirement_id}")
+
     @staticmethod
     def normalize_status(status, valid_statuses):
         if not isinstance(status, str):

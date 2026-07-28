@@ -7,8 +7,14 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from agents import Agent
+from agents._result import AgentRunResult
 from break_pipeline import BreakPipeline
 from break_pipeline import RequirementItem
+
+
+class SessionReturningAgent:
+    def run(self, work_dir, message, system_prompt=None, session_id=None, add_dirs=None):
+        return AgentRunResult("ok", session_id or "restored-session", 0)
 
 
 class BreakPipelineTests(unittest.TestCase):
@@ -173,6 +179,66 @@ class BreakPipelineTests(unittest.TestCase):
             agent_class.call_args.kwargs["prompt_dir"],
             pipeline.prompt_dir,
         )
+
+    def test_item_agent_session_is_saved_after_send(self):
+        with tempfile.TemporaryDirectory() as work_dir:
+            pipeline = BreakPipeline(work_dir)
+            self._write_requirement_files(work_dir, "R-001")
+            self._write_index(work_dir, [(1, "R-001", "待实施", "无", "001-first.md")])
+            previous_cursor = Agent._STRATEGY_MAP["cursor"]
+            Agent._STRATEGY_MAP["cursor"] = SessionReturningAgent
+            try:
+                agent = pipeline._create_agent("R-001 小需求开发", "item_developer.md")
+                agent.send_message("开发")
+            finally:
+                Agent._STRATEGY_MAP["cursor"] = previous_cursor
+
+            plan = json.loads(Path(pipeline.execution_plan_file).read_text(encoding="utf-8"))
+            self.assertEqual(
+                plan["items"][0]["agent_sessions"]["R-001 小需求开发"]["session_id"],
+                "restored-session",
+            )
+
+    def test_item_agent_session_is_restored_after_restart(self):
+        with tempfile.TemporaryDirectory() as work_dir:
+            pipeline = BreakPipeline(work_dir)
+            self._write_requirement_files(work_dir, "R-001")
+            self._write_index(work_dir, [(1, "R-001", "待实施", "无", "001-first.md")])
+            plan = json.loads(Path(pipeline.execution_plan_file).read_text(encoding="utf-8"))
+            plan["items"][0]["agent_sessions"] = {
+                "R-001 小需求开发": {
+                    "session_id": "saved-session",
+                    "agent_type": "cursor",
+                    "prompt_file": "item_developer.md",
+                }
+            }
+            Path(pipeline.execution_plan_file).write_text(json.dumps(plan, ensure_ascii=False), encoding="utf-8")
+
+            restarted = BreakPipeline(work_dir)
+            agent = restarted._create_agent("R-001 小需求开发", "item_developer.md")
+
+            self.assertEqual(agent.session_id, "saved-session")
+
+    def test_demand_agent_session_is_saved_and_restored(self):
+        with tempfile.TemporaryDirectory() as work_dir:
+            pipeline = BreakPipeline(work_dir)
+            self._write_requirement_files(work_dir, "R-001")
+            self._write_index(work_dir, [(1, "R-001", "待实施", "无", "001-first.md")])
+            pipeline._set_demand_status("拆分中", source="大需求")
+            previous_cursor = Agent._STRATEGY_MAP["cursor"]
+            Agent._STRATEGY_MAP["cursor"] = SessionReturningAgent
+            try:
+                agent = pipeline._create_agent("需求拆分", "requirement_breaker.md")
+                agent.send_message("拆分")
+            finally:
+                Agent._STRATEGY_MAP["cursor"] = previous_cursor
+
+            plan = json.loads(Path(pipeline.execution_plan_file).read_text(encoding="utf-8"))
+            self.assertEqual(plan["demand"]["agent_sessions"]["需求拆分"]["session_id"], "restored-session")
+
+            restarted = BreakPipeline(work_dir)
+            restored = restarted._create_agent("需求拆分", "requirement_breaker.md")
+            self.assertEqual(restored.session_id, "restored-session")
 
     def test_breakdown_retries_reviewer_and_human_feedback(self):
         with tempfile.TemporaryDirectory() as work_dir:

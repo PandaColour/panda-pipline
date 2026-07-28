@@ -73,9 +73,53 @@ class BreakPipeline:
         )
 
     def _create_agent(self, name, prompt_file):
-        agent = Agent(name, prompt_file, self.work_dir, add_dirs=None, agent_type="codex", prompt_dir=self.prompt_dir)
+        agent_type = "cursor"
+        session_id = self._agent_session_id(name)
+        agent = Agent(
+            name,
+            prompt_file,
+            self.work_dir,
+            add_dirs=None,
+            agent_type=agent_type,
+            prompt_dir=self.prompt_dir,
+            session_id=session_id,
+            session_update_callback=lambda new_session_id: self._set_agent_session(
+                name,
+                prompt_file,
+                agent_type,
+                new_session_id,
+            ),
+        )
         self.agents[name] = agent
         return agent
+
+    def _agent_session_id(self, agent_name):
+        try:
+            return self.execution_plan.get_agent_session(
+                agent_name,
+                requirement_id=self._agent_requirement_id(agent_name),
+            )
+        except ValueError:
+            return None
+
+    def _set_agent_session(self, agent_name, prompt_file, agent_type, session_id):
+        try:
+            self.execution_plan.set_agent_session(
+                agent_name,
+                session_id=session_id,
+                prompt_file=prompt_file,
+                agent_type=agent_type,
+                requirement_id=self._agent_requirement_id(agent_name),
+            )
+        except ValueError:
+            return
+
+    @staticmethod
+    def _agent_requirement_id(agent_name):
+        if not isinstance(agent_name, str):
+            return None
+        requirement_id = agent_name.split(" ", 1)[0]
+        return requirement_id if requirement_id.startswith("R-") else None
 
     def _item_agents(self, item):
         """Create one complete agent set per item and retain it through rework."""
@@ -444,6 +488,10 @@ class BreakPipeline:
             for item in previous_plan["items"]
         }
         changed = False
+        previous_demand_sessions = previous_plan.get("demand", {}).get("agent_sessions")
+        if previous_demand_sessions and plan.get("demand", {}).get("agent_sessions") != previous_demand_sessions:
+            plan.setdefault("demand", {})["agent_sessions"] = previous_demand_sessions
+            changed = True
         for item in plan["items"]:
             previous_item = previous_items.get(BreakPipeline._item_identity(item))
             if previous_item is None:
@@ -453,6 +501,12 @@ class BreakPipeline:
                 changed = True
             if item.get("pending_feedback") != previous_item.get("pending_feedback"):
                 item["pending_feedback"] = previous_item.get("pending_feedback")
+                changed = True
+            if item.get("agent_sessions") != previous_item.get("agent_sessions"):
+                if "agent_sessions" in previous_item:
+                    item["agent_sessions"] = previous_item.get("agent_sessions")
+                else:
+                    item.pop("agent_sessions", None)
                 changed = True
         return changed
 

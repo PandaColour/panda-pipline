@@ -24,17 +24,20 @@ class Agent:
         add_dirs=None,
         agent_type="claude",
         prompt_dir=None,
+        session_id=None,
+        session_update_callback=None,
     ):
         self.name = name
         self.work_dir = work_dir
         self.add_dirs = add_dirs or []
         self.call_count = 0
-        self.session_id = None
+        self.session_id = session_id
         self.last_run_result = None
         self.prompt_dir = prompt_dir or SYSTEM_PROMPT_DIR
         self.system_prompt = self._load_system_prompt(system_prompt_file)
         self.agent_type = agent_type
         self.agent_impl = self._create_strategy(agent_type)
+        self.session_update_callback = session_update_callback
 
     @classmethod
     def register_backend(cls, name, strategy_cls):
@@ -74,8 +77,11 @@ class Agent:
             add_dirs=self.add_dirs,
         )
         self.last_run_result = result
-        if self.session_id is None and result.session_id:
+        previous_session_id = self.session_id
+        if result.session_id:
             self.session_id = result.session_id
+        if self.session_id and self.session_id != previous_session_id and self.session_update_callback:
+            self.session_update_callback(self.session_id)
         if result.returncode != 0:
             detail = result.error or f"process exited with code {result.returncode}"
             raise RuntimeError(f"Agent [{self.name}] execution failed: {detail}")
