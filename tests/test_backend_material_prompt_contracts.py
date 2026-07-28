@@ -46,8 +46,79 @@ RUNTIME_FILES = [
     ROOT / "break_pipeline.py",
 ]
 
+PROMPT_FOCUS_REQUIREMENTS = {
+    ROOT / "system-prompt" / "requirements_analyst.md": [
+        "事实/推断/待确认",
+        "可验证验收",
+        "物料与接口可用性",
+    ],
+    ROOT / "system-prompt" / "requirements_reviewer.md": [
+        "需求完整性",
+        "证据边界",
+        "验收可测试",
+    ],
+    ROOT / "system-prompt" / "code_developer.md": [
+        "既有框架和依赖复用",
+        "真实后端优先",
+        "自测与交接",
+    ],
+    ROOT / "system-prompt" / "code_reviewer.md": [
+        "实际测试结果",
+        "依赖复用",
+        "阻断通过条件",
+    ],
+    ROOT / "break-system-prompt" / "requirement_breaker.md": [
+        "可独立交付",
+        "全局上下文",
+        "依赖顺序",
+    ],
+    ROOT / "break-system-prompt" / "requirement_break_reviewer.md": [
+        "覆盖范围",
+        "全局上下文",
+        "拆分方案通过",
+    ],
+    ROOT / "break-system-prompt" / "item_requirements_analyst.md": [
+        "当前小需求",
+        "全局上下文",
+        "可实现可验证",
+    ],
+    ROOT / "break-system-prompt" / "item_requirements_reviewer.md": [
+        "当前小需求",
+        "同意方案",
+        "证据边界",
+    ],
+    ROOT / "break-system-prompt" / "item_developer.md": [
+        "当前小需求",
+        "既有框架和依赖复用",
+        "develop_report.md",
+    ],
+    ROOT / "break-system-prompt" / "item_code_reviewer.md": [
+        "当前小需求",
+        "任务完成",
+        "阻断通过条件",
+    ],
+    ROOT / "break-system-prompt" / "index_normalizer.md": [
+        "只写 execution_plan.json",
+        "路径与依赖校验",
+        "禁止编造",
+    ],
+}
+
 
 class BackendMaterialPromptContractTests(unittest.TestCase):
+    def test_prompt_files_declare_core_focus_points(self):
+        for prompt_file, focus_terms in PROMPT_FOCUS_REQUIREMENTS.items():
+            content = prompt_file.read_text(encoding="utf-8")
+            self.assertIn("## 核心关注点", content, prompt_file.name)
+            for focus_term in focus_terms:
+                self.assertIn(focus_term, content, prompt_file.name)
+
+    def test_prompt_files_do_not_embed_repeated_memory_directory_tree(self):
+        for prompt_file in PROMPT_FOCUS_REQUIREMENTS:
+            content = prompt_file.read_text(encoding="utf-8")
+            self.assertNotIn("├──", content, prompt_file.name)
+            self.assertNotIn("memory_index.md      #", content, prompt_file.name)
+
     def test_requirement_analysis_prompts_require_material_and_interface_availability_checks(self):
         for prompt_file in ANALYSIS_PROMPTS:
             content = prompt_file.read_text(encoding="utf-8")
@@ -80,6 +151,13 @@ class BackendMaterialPromptContractTests(unittest.TestCase):
             self.assertIn("需求文档未提到接口信息", content, prompt_file.name)
             self.assertIn("优先检索仓库既有接口封装、服务调用、API 客户端、路由和配置", content, prompt_file.name)
             self.assertIn("不得直接判定为无接口或自行 mock", content, prompt_file.name)
+
+    def test_developer_prompts_require_framework_dependency_scan_before_implementation(self):
+        for prompt_file in DEVELOPER_PROMPTS:
+            content = prompt_file.read_text(encoding="utf-8")
+            self.assertIn("开发前必须先扫描当前代码的框架、依赖包、已有组件、工具函数、服务封装、API 客户端、状态管理、路由和测试工具", content, prompt_file.name)
+            self.assertIn("能用项目既有框架、依赖包或已有封装实现的，必须优先复用，不要自己再写一套", content, prompt_file.name)
+            self.assertIn("扫描范围、复用结论、未复用原因", content, prompt_file.name)
 
     def test_item_prompts_keep_original_context_and_test_credentials_visible(self):
         prompt_files = [
@@ -145,6 +223,14 @@ class BackendMaterialPromptContractTests(unittest.TestCase):
             self.assertIn("对其他功能的影响最小", content, prompt_file.name)
             self.assertIn("不满足上述要求", content, prompt_file.name)
             self.assertIn("要求开发 Agent 修改", content, prompt_file.name)
+
+    def test_code_review_prompts_block_missing_framework_dependency_reuse_scan(self):
+        for prompt_file in CODE_REVIEW_PROMPTS:
+            content = prompt_file.read_text(encoding="utf-8")
+            self.assertIn("重点检查 developer 是否在开发前扫描当前代码的框架、依赖包和已有封装", content, prompt_file.name)
+            self.assertIn("能用项目既有框架、依赖包或已有代码实现", content, prompt_file.name)
+            self.assertIn("重复造轮子", content, prompt_file.name)
+            self.assertIn("不得通过", content, prompt_file.name)
 
     def test_code_review_prompts_allow_well_disclosed_requirement_gaps(self):
         for prompt_file in CODE_REVIEW_PROMPTS:
