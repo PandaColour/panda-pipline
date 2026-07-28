@@ -233,20 +233,7 @@ class ExecutionPlanStore:
 
     @staticmethod
     def validate(plan, valid_statuses, expected_source_hash=None):
-        if not isinstance(plan, dict):
-            raise ValueError("执行计划格式无效。")
-        demand = plan.get("demand")
-        if not isinstance(demand, dict):
-            raise ValueError("执行计划缺少需求整体状态。")
-        if not isinstance(demand.get("id"), str) or not demand["id"].strip():
-            raise ValueError("执行计划缺少有效的需求整体 ID。")
-        if not isinstance(demand.get("source"), str):
-            raise ValueError("执行计划缺少有效的需求来源。")
-        demand_status = ExecutionPlanStore.normalize_demand_status(demand.get("status"))
-        if demand_status != demand.get("status"):
-            demand["status"] = demand_status
-        if demand["status"] not in DEMAND_STATUSES:
-            raise ValueError(f"未知需求整体状态: {demand['status']}")
+        ExecutionPlanStore.validate_demand(plan)
         source_hash = plan.get("source_index_sha256")
         if not isinstance(source_hash, str) or len(source_hash) != 64 or any(
             character not in "0123456789abcdef" for character in source_hash.lower()
@@ -287,6 +274,23 @@ class ExecutionPlanStore:
                 for field in ("kind", "source_status", "message"):
                     if not isinstance(feedback.get(field), str):
                         raise ValueError(f"执行计划条目的待处理反馈字段无效: {field}")
+
+    @staticmethod
+    def validate_demand(plan):
+        if not isinstance(plan, dict):
+            raise ValueError("执行计划格式无效。")
+        demand = plan.get("demand")
+        if not isinstance(demand, dict):
+            raise ValueError("执行计划缺少需求整体状态。")
+        if not isinstance(demand.get("id"), str) or not demand["id"].strip():
+            raise ValueError("执行计划缺少有效的需求整体 ID。")
+        if not isinstance(demand.get("source"), str):
+            raise ValueError("执行计划缺少有效的需求来源。")
+        demand_status = ExecutionPlanStore.normalize_demand_status(demand.get("status"))
+        if demand_status != demand.get("status"):
+            demand["status"] = demand_status
+        if demand["status"] not in DEMAND_STATUSES:
+            raise ValueError(f"未知需求整体状态: {demand['status']}")
 
     @staticmethod
     def _ensure_demand(plan):

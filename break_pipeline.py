@@ -155,21 +155,24 @@ class BreakPipeline:
 
     def _run_breakdown(self, user_idea=None):
         print("\n" + "=" * 60 + "\n📋 阶段 1: 大需求拆分\n" + "=" * 60)
-        breaker = self._create_agent("需求拆分", "requirement_breaker.md")
-        reviewer = self._create_agent("拆分评审", "requirement_break_reviewer.md")
         has_existing_index = os.path.isfile(self.requirements_index_file)
-        if user_idea is None and has_existing_index:
+        resume_existing_index = user_idea is None and has_existing_index
+        initial_breakdown_message = None
+        if resume_existing_index:
             user_idea = "已有拆分产物；请在不重置已写内容的前提下完成恢复审查。"
         elif user_idea is None:
             user_idea = input("\n🎯 请输入总体开发需求描述:\n> ")
+        if has_existing_index:
             self._set_demand_status("拆分中", source=user_idea)
-            breaker.send_message(self._breakdown_instruction(user_idea))
-        elif has_existing_index:
-            self._set_demand_status("拆分中", source=user_idea)
-            breaker.send_message(self._breakdown_update_instruction(user_idea))
+            if not resume_existing_index:
+                initial_breakdown_message = self._breakdown_update_instruction(user_idea)
         else:
             self._set_demand_status("拆分中", source=user_idea)
-            breaker.send_message(self._breakdown_instruction(user_idea))
+            initial_breakdown_message = self._breakdown_instruction(user_idea)
+        breaker = self._create_agent("需求拆分", "requirement_breaker.md")
+        reviewer = self._create_agent("拆分评审", "requirement_break_reviewer.md")
+        if initial_breakdown_message:
+            breaker.send_message(initial_breakdown_message)
         while True:
             self._set_demand_status("拆分评审中", source=user_idea)
             for attempt in range(1, MAX_REQUIREMENT_REVIEW_ATTEMPTS + 1):
@@ -475,23 +478,39 @@ class BreakPipeline:
         try:
             plan = self.execution_plan.read()
             self.execution_plan.normalize_plan(plan, VALID_STATUSES)
+            self.execution_plan.validate_demand(plan)
+        except ValueError:
+            return None
+        try:
             self.execution_plan.validate(plan, VALID_STATUSES)
             self._validate_items_from_plan(plan)
         except ValueError:
-            return None
+            plan["items"] = []
         return plan
 
     @staticmethod
     def _preserve_unchanged_statuses(previous_plan, plan):
         previous_items = {
             BreakPipeline._item_identity(item): item
-            for item in previous_plan["items"]
+            for item in previous_plan.get("items", [])
+            if BreakPipeline._has_item_identity(item)
         }
         changed = False
-        previous_demand_sessions = previous_plan.get("demand", {}).get("agent_sessions")
-        if previous_demand_sessions and plan.get("demand", {}).get("agent_sessions") != previous_demand_sessions:
-            plan.setdefault("demand", {})["agent_sessions"] = previous_demand_sessions
+        previous_demand = previous_plan.get("demand", {})
+        demand = plan.setdefault("demand", {})
+        if previous_demand.get("status") and demand.get("status") != previous_demand.get("status"):
+            demand["status"] = previous_demand.get("status")
             changed = True
+        if previous_demand.get("source") and demand.get("source") != previous_demand.get("source"):
+            demand["source"] = previous_demand.get("source")
+            changed = True
+        previous_demand_sessions = previous_demand.get("agent_sessions")
+        if isinstance(previous_demand_sessions, dict):
+            demand_sessions = demand.setdefault("agent_sessions", {})
+            for agent_name, session_record in previous_demand_sessions.items():
+                if demand_sessions.get(agent_name) != session_record:
+                    demand_sessions[agent_name] = session_record
+                    changed = True
         for item in plan["items"]:
             previous_item = previous_items.get(BreakPipeline._item_identity(item))
             if previous_item is None:
@@ -509,6 +528,15 @@ class BreakPipeline:
                     item.pop("agent_sessions", None)
                 changed = True
         return changed
+
+    @staticmethod
+    def _has_item_identity(item):
+        return (
+            isinstance(item, dict)
+            and isinstance(item.get("id"), str)
+            and isinstance(item.get("name"), str)
+            and isinstance(item.get("requirements_file"), str)
+        )
 
     @staticmethod
     def _item_identity(item):

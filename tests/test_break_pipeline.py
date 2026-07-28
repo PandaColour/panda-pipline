@@ -180,6 +180,23 @@ class BreakPipelineTests(unittest.TestCase):
             pipeline.prompt_dir,
         )
 
+    def test_breakdown_creates_draft_plan_before_agents(self):
+        with tempfile.TemporaryDirectory() as work_dir:
+            pipeline = BreakPipeline(work_dir)
+
+            def create_agent(name, _prompt):
+                self.assertTrue(Path(pipeline.execution_plan_file).exists(), name)
+                agent = MagicMock()
+                agent.send_message.return_value = "拆分方案通过" if name == "拆分评审" else "ok"
+                return agent
+
+            with patch.object(pipeline, "_create_agent", side_effect=create_agent), \
+                    patch.object(pipeline, "_human_gate", return_value=None):
+                pipeline._run_breakdown("大需求")
+
+            plan = json.loads(Path(pipeline.execution_plan_file).read_text(encoding="utf-8"))
+            self.assertEqual(plan["demand"]["source"], "大需求")
+
     def test_item_agent_session_is_saved_after_send(self):
         with tempfile.TemporaryDirectory() as work_dir:
             pipeline = BreakPipeline(work_dir)

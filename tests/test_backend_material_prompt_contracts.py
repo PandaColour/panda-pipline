@@ -28,6 +28,13 @@ CODE_REVIEW_PROMPTS = [
     ROOT / "break-system-prompt" / "item_code_reviewer.md",
 ]
 
+SHARED_CONTEXT_CONSUMER_PROMPTS = [
+    ROOT / "break-system-prompt" / "item_requirements_analyst.md",
+    ROOT / "break-system-prompt" / "item_requirements_reviewer.md",
+    ROOT / "break-system-prompt" / "item_developer.md",
+    ROOT / "break-system-prompt" / "item_code_reviewer.md",
+]
+
 MEMORY_WRITER_PROMPTS = [
     ROOT / "system-prompt" / "requirements_analyst.md",
     ROOT / "system-prompt" / "code_developer.md",
@@ -69,6 +76,9 @@ PROMPT_FOCUS_REQUIREMENTS = {
     ],
     ROOT / "break-system-prompt" / "requirement_breaker.md": [
         "可独立交付",
+        "架构师职责",
+        "架构复用性",
+        "系统长期维护",
         "全局上下文",
         "依赖顺序",
     ],
@@ -118,6 +128,26 @@ class BackendMaterialPromptContractTests(unittest.TestCase):
             content = prompt_file.read_text(encoding="utf-8")
             self.assertNotIn("├──", content, prompt_file.name)
             self.assertNotIn("memory_index.md      #", content, prompt_file.name)
+
+    def test_breakdown_prompts_require_batch_shared_context_file(self):
+        writer = (ROOT / "break-system-prompt" / "requirement_breaker.md").read_text(encoding="utf-8")
+        self.assertIn("requirements/shared_context.md", writer)
+        self.assertIn("本批次临时公共信息", writer)
+        self.assertIn("planned/unverified", writer)
+        self.assertIn("不得写入 `memory/`", writer)
+
+        reviewer = (ROOT / "break-system-prompt" / "requirement_break_reviewer.md").read_text(encoding="utf-8")
+        self.assertIn("requirements/shared_context.md", reviewer)
+        self.assertIn("本批次临时公共信息", reviewer)
+        self.assertIn("planned/unverified", reviewer)
+        self.assertIn("不得通过", reviewer)
+
+    def test_item_prompts_require_reading_batch_shared_context(self):
+        for prompt_file in SHARED_CONTEXT_CONSUMER_PROMPTS:
+            content = prompt_file.read_text(encoding="utf-8")
+            self.assertIn("requirements/shared_context.md", content, prompt_file.name)
+            self.assertIn("本批次临时公共信息", content, prompt_file.name)
+            self.assertIn("planned/unverified", content, prompt_file.name)
 
     def test_requirement_analysis_prompts_require_material_and_interface_availability_checks(self):
         for prompt_file in ANALYSIS_PROMPTS:

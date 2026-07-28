@@ -154,6 +154,56 @@ class BreakExecutionPlanTests(unittest.TestCase):
         self.assertIn(str(self.index_file), normalizer.send_message.call_args.args[0])
         self.assertEqual(self.pipeline._load_items()[0].requirement_id, "R-001")
 
+    def test_normalizer_preserves_draft_demand_agent_sessions(self):
+        self.pipeline.execution_plan.set_demand_status("开发中", source="登录需求")
+        self.pipeline.execution_plan.set_agent_session(
+            "需求拆分",
+            session_id="breakdown-session",
+            prompt_file="requirement_breaker.md",
+            agent_type="cursor",
+        )
+        self.pipeline.execution_plan.set_agent_session(
+            "拆分评审",
+            session_id="breakdown-review-session",
+            prompt_file="requirement_break_reviewer.md",
+            agent_type="cursor",
+        )
+        normalizer = MagicMock()
+
+        def write_normalized_plan(_message):
+            plan = self._plan()
+            plan["demand"] = {
+                "id": "D-001",
+                "status": "开发中",
+                "source": "",
+                "agent_sessions": {
+                    "执行索引规范化": {
+                        "session_id": "normalizer-session",
+                        "prompt_file": "index_normalizer.md",
+                        "agent_type": "cursor",
+                    },
+                },
+            }
+            self._write_plan(plan)
+
+        normalizer.send_message.side_effect = write_normalized_plan
+
+        with patch.object(self.pipeline, "_create_agent", return_value=normalizer):
+            self.pipeline._ensure_execution_plan()
+
+        saved_plan = json.loads(Path(self.pipeline.execution_plan_file).read_text(encoding="utf-8"))
+        self.assertEqual(saved_plan["demand"]["source"], "登录需求")
+        self.assertEqual(saved_plan["demand"]["agent_sessions"]["需求拆分"]["session_id"], "breakdown-session")
+        self.assertEqual(
+            saved_plan["demand"]["agent_sessions"]["拆分评审"]["session_id"],
+            "breakdown-review-session",
+        )
+        self.assertEqual(
+            saved_plan["demand"]["agent_sessions"]["执行索引规范化"]["session_id"],
+            "normalizer-session",
+        )
+        self.assertEqual(saved_plan["demand"]["agent_sessions"]["需求拆分"]["prompt_file"], "requirement_breaker.md")
+
     def test_normalizer_refusal_is_reported_without_masking_it_as_missing_plan(self):
         normalizer = MagicMock()
         normalizer.send_message.return_value = "索引表缺少可识别的需求条目"
