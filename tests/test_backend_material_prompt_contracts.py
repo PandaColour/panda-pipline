@@ -219,6 +219,16 @@ class BackendMaterialPromptContractTests(unittest.TestCase):
             self.assertNotIn("不编写或修改测试代码", content, prompt_file.name)
             self.assertNotIn("不编写测试代码", content, prompt_file.name)
 
+    def test_developer_prompts_require_minimum_smoke_tests_and_layered_fallback(self):
+        for prompt_file in DEVELOPER_PROMPTS:
+            content = prompt_file.read_text(encoding="utf-8")
+            self.assertIn("最小冒烟测试", content, prompt_file.name)
+            self.assertIn("不得仅以源码对齐、编译通过或脚本验证替代运行验证", content, prompt_file.name)
+            self.assertIn("构建、安装、启动", content, prompt_file.name)
+            self.assertIn("mock/stub", content, prompt_file.name)
+            self.assertIn("不得将 mock 冒烟结果描述为真实端到端验收", content, prompt_file.name)
+            self.assertIn("IDE Run `app`", content, prompt_file.name)
+
     def test_review_prompts_allow_disclosed_mocks_but_require_backend_todo(self):
         for prompt_file in REVIEW_PROMPTS:
             content = prompt_file.read_text(encoding="utf-8")
@@ -235,6 +245,16 @@ class BackendMaterialPromptContractTests(unittest.TestCase):
             self.assertIn("mock 网络请求", content, prompt_file.name)
             self.assertIn("开发测试验证", content, prompt_file.name)
             self.assertIn("不得通过", content, prompt_file.name)
+
+    def test_code_review_prompts_block_missing_minimum_smoke_tests(self):
+        for prompt_file in CODE_REVIEW_PROMPTS:
+            content = prompt_file.read_text(encoding="utf-8")
+            self.assertIn("最小冒烟测试审查", content, prompt_file.name)
+            self.assertIn("仅有源码分析、编译通过、脚本验证", content, prompt_file.name)
+            self.assertIn("账号、权限、网络或后端不可用不是跳过冒烟测试的理由", content, prompt_file.name)
+            self.assertIn("分层冒烟测试", content, prompt_file.name)
+            self.assertIn("不得通过", content, prompt_file.name)
+            self.assertIn("IDE Run `app`", content, prompt_file.name)
 
     def test_review_prompts_allow_evidence_based_inference_without_fabrication(self):
         for prompt_file in REVIEW_PROMPTS:
