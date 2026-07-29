@@ -12,6 +12,7 @@ from workflow import human_gate
 
 
 BREAK_SYSTEM_PROMPT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "break-system-prompt")
+MEMORY_CURATION_PROMPT = "memory_curation.md"
 BREAKDOWN_APPROVAL = "拆分方案通过"
 ITEM_APPROVAL = "任务完成"
 REQUIREMENTS_APPROVAL = "同意方案"
@@ -92,6 +93,16 @@ class BreakPipeline:
         )
         self.agents[name] = agent
         return agent
+
+    def _render_break_prompt(self, prompt_file, **values):
+        template_path = os.path.join(self.prompt_dir, prompt_file)
+        with open(template_path, encoding="utf-8") as template_file:
+            template = template_file.read()
+        try:
+            return template.format(**values)
+        except KeyError as error:
+            missing_key = error.args[0]
+            raise ValueError(f"Prompt template {prompt_file} missing placeholder value: {missing_key}") from error
 
     def _agent_session_id(self, agent_name):
         try:
@@ -385,18 +396,30 @@ class BreakPipeline:
         )
         memory_dir = os.path.join(self.work_dir, "memory") + os.sep
         curation_messages = {
-            "analyst": (
-                f"当前需求 {item.requirement_id} 已通过人工审核，收到记忆整理指令。"
-                f"请读取需要核验的正式产物：{report_paths}，只将需求侧事实沉淀到 {memory_dir}："
-                "业务规则、状态流转、场景流程、接口约束、UI/Figma 约束、验收规则和待确认边界。"
-                "需求评审和代码审查报告只作为证据输入；不得修改其他需求、执行计划或源码。"
+            "analyst": self._render_break_prompt(
+                MEMORY_CURATION_PROMPT,
+                opening="调用消息指定的小需求已通过人工审核，收到记忆整理指令。",
+                read_instruction=f"请读取需要核验的正式产物：{report_paths}。",
+                curation_scope=(
+                    f"只将需求侧事实沉淀到 {memory_dir}："
+                    "业务规则、状态流转、场景流程、接口约束、UI/Figma 约束、验收规则和待确认边界。"
+                ),
+                execution_plan_file=self.execution_plan_file,
+                closing_instruction="需求评审和代码审查报告只作为证据输入；不得修改其他需求、执行计划或源码。",
             ),
-            "developer": (
-                f"当前需求 {item.requirement_id} 已通过人工审核，收到记忆整理指令。"
-                f"请读取需要核验的正式产物：{report_paths}、当前代码及已更新的 memory/，"
-                f"只将实现侧事实沉淀到 {memory_dir}：真实代码路径、接口封装、认证方式、复用方式、模块边界、实现坑点和禁止做法。"
-                f"需求评审和代码审查报告只作为证据输入；不得修改其他需求、执行计划或源码。"
-                f"最后将本小需求的沉淀结果、证据来源、更新的 memory 文件、未沉淀原因和后续注意事项写入 {paths['memory_report']}。"
+            "developer": self._render_break_prompt(
+                MEMORY_CURATION_PROMPT,
+                opening="调用消息指定的小需求已通过人工审核，收到记忆整理指令。",
+                read_instruction=f"请读取需要核验的正式产物：{report_paths}、当前代码及已更新的 memory/。",
+                curation_scope=(
+                    f"只将实现侧事实沉淀到 {memory_dir}："
+                    "真实代码路径、接口封装、认证方式、复用方式、模块边界、实现坑点和禁止做法。"
+                ),
+                execution_plan_file=self.execution_plan_file,
+                closing_instruction=(
+                    "需求评审和代码审查报告只作为证据输入；不得修改其他需求、执行计划或源码。"
+                    f"最后将本小需求的沉淀结果、证据来源、更新的 memory 文件、未沉淀原因和后续注意事项写入 {paths['memory_report']}。"
+                ),
             ),
         }
         for role, message in curation_messages.items():
@@ -711,7 +734,15 @@ class BreakPipeline:
         items = self._load_items()
         memory_reports = [self._item_paths(item)["memory_report"] for item in items]
         breaker.send_message(
-            f"所有小需求已完成。请只进行拆分层面的最终记忆整理：读取 {self.requirements_index_file} 和各项记忆报告 "
-            f"{memory_reports}，结合项目 memory/，只沉淀跨需求可复用的拆分、依赖和整体架构结论。"
-            "不要重复各项已沉淀的实现细节，不得修改需求、报告、执行计划或源码。"
+            self._render_break_prompt(
+                MEMORY_CURATION_PROMPT,
+                opening="所有小需求已完成。请只进行拆分层面的最终记忆整理。",
+                read_instruction=(
+                    f"请读取 {self.requirements_index_file}、{self.execution_plan_file}、"
+                    f"各项记忆报告 {memory_reports}、当前源码和项目 memory/。"
+                ),
+                curation_scope="只沉淀跨需求可复用的拆分、依赖和整体架构结论。",
+                execution_plan_file=self.execution_plan_file,
+                closing_instruction="不要重复各项已沉淀的实现细节，不得修改需求、报告、执行计划或源码。",
+            )
         )

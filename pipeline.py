@@ -1,10 +1,12 @@
 import os
 from agents import Agent
+from config import SYSTEM_PROMPT_DIR
 from execution_plan import ExecutionPlanStore
 from review_decision import review_passed
 from workflow import human_gate
 
 MAX_REQUIREMENT_REVIEW_ATTEMPTS = 3
+MEMORY_CURATION_PROMPT = "memory_curation.md"
 VALID_STATUSES = {
     "需求分析中",
     "需求评审中",
@@ -40,6 +42,7 @@ class Pipeline:
         self.code_review_file = os.path.join(self.requirement_dir, "code_review.md")
         self.bug_report_file = os.path.join(self.requirement_dir, "bug_report.md")
         self.memory_report_file = os.path.join(self.requirement_dir, "memory_report.md")
+        self.prompt_dir = SYSTEM_PROMPT_DIR
         self.agents = {}
 
     def _human_gate(self, stage_name, review_file_path=None):
@@ -58,9 +61,20 @@ class Pipeline:
             self.work_dir,
             add_dirs=None,
             agent_type="cursor",
+            prompt_dir=self.prompt_dir,
         )
         self.agents[name] = agent
         return agent
+
+    def _render_system_prompt(self, prompt_file, **values):
+        template_path = os.path.join(self.prompt_dir, prompt_file)
+        with open(template_path, encoding="utf-8") as template_file:
+            template = template_file.read()
+        try:
+            return template.format(**values)
+        except KeyError as error:
+            missing_key = error.args[0]
+            raise ValueError(f"Prompt template {prompt_file} missing placeholder value: {missing_key}") from error
 
     def run(self, user_idea=None):
         if self._active_requirements_complete():
@@ -400,16 +414,30 @@ class Pipeline:
             f"{self.test_report_file}、{self.code_review_file}"
         )
         curation_messages = {
-            "需求分析": (
-                f"收到记忆整理指令。请读取已验证产物：{report_paths}，只将需求侧事实沉淀到 {memory_dir}："
-                "业务规则、状态流转、场景流程、接口约束、UI/Figma 约束、验收规则和待确认边界。"
-                "审查报告只作为证据输入；不得写入猜测、临时任务细节或未验证风险。"
+            "需求分析": self._render_system_prompt(
+                MEMORY_CURATION_PROMPT,
+                opening="收到记忆整理指令。",
+                read_instruction=f"请读取已验证产物：{report_paths}。",
+                curation_scope=(
+                    f"只将需求侧事实沉淀到 {memory_dir}："
+                    "业务规则、状态流转、场景流程、接口约束、UI/Figma 约束、验收规则和待确认边界。"
+                ),
+                execution_plan_file=self.execution_plan_file,
+                closing_instruction="审查报告只作为证据输入；不得修改需求、报告、执行计划或源码。",
             ),
-            "代码开发": (
-                f"收到记忆整理指令。请读取已验证产物：{report_paths} 以及当前代码，只将实现侧事实沉淀到 {memory_dir}："
-                "真实代码路径、接口封装、认证方式、复用方式、模块边界、实现坑点和禁止做法。"
-                f"审查报告只作为证据输入；不得写入猜测、临时任务细节或未验证风险。"
-                f"最后将沉淀结果、证据来源、更新的 memory 文件和后续注意事项写入 {self.memory_report_file}。"
+            "代码开发": self._render_system_prompt(
+                MEMORY_CURATION_PROMPT,
+                opening="收到记忆整理指令。",
+                read_instruction=f"请读取已验证产物：{report_paths} 以及当前代码。",
+                curation_scope=(
+                    f"只将实现侧事实沉淀到 {memory_dir}："
+                    "真实代码路径、接口封装、认证方式、复用方式、模块边界、实现坑点和禁止做法。"
+                ),
+                execution_plan_file=self.execution_plan_file,
+                closing_instruction=(
+                    "审查报告只作为证据输入；不得修改需求、报告、执行计划或源码。"
+                    f"最后将沉淀结果、证据来源、更新的 memory 文件和后续注意事项写入 {self.memory_report_file}。"
+                ),
             ),
         }
 

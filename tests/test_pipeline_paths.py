@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from config import SYSTEM_PROMPT_DIR
 from pipeline import Pipeline
 
 
@@ -86,7 +87,57 @@ class PipelinePathTests(unittest.TestCase):
             pipeline.work_dir,
             add_dirs=None,
             agent_type="cursor",
+            prompt_dir=pipeline.prompt_dir,
         )
+
+    def test_memory_curation_template_lives_in_system_prompt(self):
+        template = Path(SYSTEM_PROMPT_DIR) / "memory_curation.md"
+
+        self.assertTrue(template.is_file())
+        content = template.read_text(encoding="utf-8")
+        for placeholder in (
+            "{opening}",
+            "{read_instruction}",
+            "{curation_scope}",
+            "{execution_plan_file}",
+            "{closing_instruction}",
+        ):
+            self.assertIn(placeholder, content)
+        self.assertIn("记忆整理目的", content)
+        self.assertIn("为后续类似项目从0到1提供指导", content)
+        self.assertIn("为后续需求提供代码索引", content)
+        self.assertIn("当前源码", content)
+        self.assertIn("长期 memory 不得写入 R-xxx", content)
+
+    def test_final_reflection_renders_system_prompt_template(self):
+        with tempfile.TemporaryDirectory() as work_dir, tempfile.TemporaryDirectory() as prompt_dir:
+            template = Path(prompt_dir) / "memory_curation.md"
+            template.write_text(
+                "CUSTOM SYSTEM TEMPLATE\n"
+                "{opening}\n"
+                "{read_instruction}\n"
+                "{curation_scope}\n"
+                "{execution_plan_file}\n"
+                "{closing_instruction}\n",
+                encoding="utf-8",
+            )
+            pipeline = Pipeline(work_dir)
+            pipeline.prompt_dir = prompt_dir
+            analyst = MagicMock()
+            developer = MagicMock()
+            pipeline.agents = {
+                "需求分析": analyst,
+                "代码开发": developer,
+            }
+
+            pipeline._run_final_reflection()
+
+            analyst_prompt = analyst.send_message.call_args.args[0]
+            developer_prompt = developer.send_message.call_args.args[0]
+            for prompt in (analyst_prompt, developer_prompt):
+                self.assertIn("CUSTOM SYSTEM TEMPLATE", prompt)
+                self.assertIn(pipeline.execution_plan_file, prompt)
+                self.assertIn("收到记忆整理指令", prompt)
 
     def test_run_passes_user_idea_into_requirements_stage(self):
         pipeline = Pipeline("relative-workspace")

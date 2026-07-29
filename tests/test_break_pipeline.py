@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 
 from agents import Agent
 from agents._result import AgentRunResult
+from break_pipeline import BREAK_SYSTEM_PROMPT_DIR
 from break_pipeline import BreakPipeline
 from break_pipeline import RequirementItem
 
@@ -97,6 +98,54 @@ class BreakPipelineTests(unittest.TestCase):
         self.assertNotIn("R-001", pipeline._active_item_agents)
         self.assertNotIn(agent.name, pipeline.agents)
 
+    def test_memory_curation_template_lives_in_break_system_prompt(self):
+        template = Path(BREAK_SYSTEM_PROMPT_DIR) / "memory_curation.md"
+
+        self.assertTrue(template.is_file())
+        content = template.read_text(encoding="utf-8")
+        for placeholder in (
+            "{opening}",
+            "{read_instruction}",
+            "{curation_scope}",
+            "{execution_plan_file}",
+            "{closing_instruction}",
+        ):
+            self.assertIn(placeholder, content)
+        self.assertIn("记忆整理目的", content)
+        self.assertIn("为后续类似项目从0到1提供指导", content)
+        self.assertIn("为后续需求提供代码索引", content)
+
+    def test_item_memory_prompt_renders_break_system_prompt_template(self):
+        with tempfile.TemporaryDirectory() as work_dir, tempfile.TemporaryDirectory() as prompt_dir:
+            template = Path(prompt_dir) / "memory_curation.md"
+            template.write_text(
+                "CUSTOM TEMPLATE\n"
+                "{opening}\n"
+                "{read_instruction}\n"
+                "{curation_scope}\n"
+                "{execution_plan_file}\n"
+                "{closing_instruction}\n",
+                encoding="utf-8",
+            )
+            pipeline = BreakPipeline(work_dir)
+            pipeline.prompt_dir = prompt_dir
+            self._write_requirement_files(work_dir, "R-001")
+            self._write_index(work_dir, [(1, "R-001", "记忆整理中", "无", "001-first.md")])
+            item = RequirementItem(
+                1, "R-001", "name", "记忆整理中", [],
+                "R-001-first/user_requirements.md", "ok",
+            )
+            agents = self._item_agent_set()
+
+            pipeline._run_item_memory(item, agents)
+
+            analyst_prompt = agents["analyst"].send_message.call_args.args[0]
+            developer_prompt = agents["developer"].send_message.call_args.args[0]
+            for prompt in (analyst_prompt, developer_prompt):
+                self.assertIn("CUSTOM TEMPLATE", prompt)
+                self.assertIn(pipeline.execution_plan_file, prompt)
+                self.assertIn("调用消息指定的小需求已通过人工审核", prompt)
+
     def test_code_approval_runs_memory_curation_before_completion(self):
         with tempfile.TemporaryDirectory() as work_dir:
             pipeline = BreakPipeline(work_dir)
@@ -117,6 +166,38 @@ class BreakPipelineTests(unittest.TestCase):
             self.assertIn("memory_report.md", agents["developer"].send_message.call_args.args[0])
             plan = json.loads(Path(pipeline.execution_plan_file).read_text(encoding="utf-8"))
             self.assertEqual(plan["items"][0]["status"], "已完成")
+
+    def test_item_memory_prompt_bans_requirement_ids_from_long_term_memory(self):
+        with tempfile.TemporaryDirectory() as work_dir:
+            pipeline = BreakPipeline(work_dir)
+            self._write_requirement_files(work_dir, "R-001")
+            self._write_index(work_dir, [(1, "R-001", "记忆整理中", "无", "001-first.md")])
+            item = RequirementItem(
+                1, "R-001", "name", "记忆整理中", [],
+                "R-001-first/user_requirements.md", "ok",
+            )
+            agents = self._item_agent_set()
+
+            pipeline._run_item_memory(item, agents)
+
+            analyst_prompt = agents["analyst"].send_message.call_args.args[0]
+            developer_prompt = agents["developer"].send_message.call_args.args[0]
+            for prompt in (analyst_prompt, developer_prompt):
+                self.assertIn("记忆整理目的", prompt)
+                self.assertIn("为后续类似项目从0到1提供指导", prompt)
+                self.assertIn("为后续需求提供代码索引", prompt)
+                self.assertIn("架构边界", prompt)
+                self.assertIn("关键类/函数", prompt)
+                self.assertIn("当前源码", prompt)
+                self.assertIn("execution_plan.json", prompt)
+                self.assertIn("当前已实现事实", prompt)
+                self.assertIn("长期 memory 不得写入 R-xxx", prompt)
+                self.assertIn("不得写入小需求名称", prompt)
+                self.assertIn("来源追溯只保留在 memory_report.md 和 execution_plan.json", prompt)
+                self.assertIn("不进入 memory/ 文件", prompt)
+                self.assertNotIn("只能作为来源证据", prompt)
+                self.assertIn("历史 memory", prompt)
+                self.assertIn("未沉淀原因", prompt)
 
     def test_restart_at_memory_status_only_runs_curator(self):
         with tempfile.TemporaryDirectory() as work_dir:
@@ -146,6 +227,33 @@ class BreakPipelineTests(unittest.TestCase):
 
             create_agent.assert_not_called()
             breakdown_agent.send_message.assert_called_once()
+
+    def test_final_memory_prompt_bans_requirement_ids_from_long_term_memory(self):
+        with tempfile.TemporaryDirectory() as work_dir:
+            pipeline = BreakPipeline(work_dir)
+            self._write_requirement_files(work_dir, "R-001")
+            self._write_index(work_dir, [(1, "R-001", "已完成", "无", "001-first.md")])
+            breakdown_agent = MagicMock()
+            pipeline.agents["需求拆分"] = breakdown_agent
+
+            pipeline._run_final_reflection()
+
+            prompt = breakdown_agent.send_message.call_args.args[0]
+            self.assertIn("记忆整理目的", prompt)
+            self.assertIn("为后续类似项目从0到1提供指导", prompt)
+            self.assertIn("为后续需求提供代码索引", prompt)
+            self.assertIn("架构边界", prompt)
+            self.assertIn("关键类/函数", prompt)
+            self.assertIn("当前源码", prompt)
+            self.assertIn("execution_plan.json", prompt)
+            self.assertIn("当前已实现事实", prompt)
+            self.assertIn("长期 memory 不得写入 R-xxx", prompt)
+            self.assertIn("不得写入小需求名称", prompt)
+            self.assertIn("来源追溯只保留在 memory_report.md 和 execution_plan.json", prompt)
+            self.assertIn("不进入 memory/ 文件", prompt)
+            self.assertNotIn("只能作为来源证据", prompt)
+            self.assertIn("历史 memory", prompt)
+            self.assertIn("按模块、接口、业务规则和架构能力组织", prompt)
 
     @staticmethod
     def _item_agent_set():
