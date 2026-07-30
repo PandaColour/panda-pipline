@@ -13,6 +13,12 @@ class AgentSessionTests(unittest.TestCase):
         agent.agent_impl.run.side_effect = results
         return agent
 
+    def test_agent_builds_its_own_display_name(self):
+        with patch.object(Agent, "_load_system_prompt", return_value="system"):
+            agent = Agent("需求拆分", "prompt.md", "/work/repo", agent_type="codex")
+
+        self.assertEqual(agent.display_name, "需求拆分agent(codex)")
+
     def test_saves_first_session_id_and_resumes_it_on_second_call(self):
         agent = self._agent_with_runner(
             SimpleNamespace(text="first", session_id="chat-1", returncode=0, error=None),

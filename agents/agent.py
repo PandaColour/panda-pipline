@@ -62,11 +62,15 @@ class Agent:
             print(f"⚠️  Warning: system prompt file not found: {filepath}")
             return ""
 
+    @property
+    def display_name(self):
+        return f"{self.name}agent({self.agent_type})"
+
     def send_message(self, message):
         """Send one turn and resume this instance's explicit provider session."""
         self.call_count += 1
         print(f"\n{'=' * 60}")
-        print(f"🤖 Agent [{self.name}] — 第 {self.call_count} 次调用 (backend: {self.agent_type})")
+        print(f"🤖 {self.display_name} — 第 {self.call_count} 次调用")
         print(f"{'=' * 60}")
 
         result = self.agent_impl.run(
@@ -84,5 +88,5 @@ class Agent:
             self.session_update_callback(self.session_id)
         if result.returncode != 0:
             detail = result.error or f"process exited with code {result.returncode}"
-            raise RuntimeError(f"Agent [{self.name}] execution failed: {detail}")
+            raise RuntimeError(f"{self.display_name} execution failed: {detail}")
         return result.text

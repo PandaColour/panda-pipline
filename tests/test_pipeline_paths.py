@@ -162,6 +162,7 @@ class PipelinePathTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as work_dir:
             pipeline = Pipeline(work_dir)
             analyst = MagicMock()
+            analyst.display_name = "需求分析agent(cursor)"
             reviewer = MagicMock()
             reviewer.send_message.return_value = "同意方案"
             agents = {"需求分析": analyst, "需求审查": reviewer}
@@ -188,6 +189,7 @@ class PipelinePathTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as work_dir:
             pipeline = Pipeline(work_dir)
             analyst = MagicMock()
+            analyst.display_name = "需求分析agent(cursor)"
             reviewer = MagicMock()
             reviewer.send_message.side_effect = ["缺少范围", "仍缺少验收", "还不完整"]
             agents = {"需求分析": analyst, "需求审查": reviewer}
@@ -200,7 +202,12 @@ class PipelinePathTests(unittest.TestCase):
             self.assertEqual(analyst.send_message.call_count, 3)
             self.assertIn("缺少范围", analyst.send_message.call_args_list[1].args[0])
             self.assertIn("仍缺少验收", analyst.send_message.call_args_list[2].args[0])
-            gate.assert_called_once_with("1. 需求分析", pipeline.user_requirements_file, skip_human=False)
+            gate.assert_called_once_with(
+                "1. 需求分析",
+                pipeline.user_requirements_file,
+                skip_human=False,
+                feedback_target="需求分析agent(cursor)",
+            )
 
     def test_ensure_execution_plan_creates_single_requirement_under_requirements(self):
         with tempfile.TemporaryDirectory() as work_dir:

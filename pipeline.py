@@ -45,8 +45,11 @@ class Pipeline:
         self.prompt_dir = SYSTEM_PROMPT_DIR
         self.agents = {}
 
-    def _human_gate(self, stage_name, review_file_path=None):
-        return human_gate(stage_name, review_file_path, skip_human=self.skip_human)
+    def _human_gate(self, stage_name, review_file_path=None, feedback_agent=None):
+        gate_options = {"skip_human": self.skip_human}
+        if feedback_agent is not None:
+            gate_options["feedback_target"] = feedback_agent.display_name
+        return human_gate(stage_name, review_file_path, **gate_options)
 
     def has_resumable_state(self):
         plan = self._valid_existing_plan()
@@ -193,7 +196,7 @@ class Pipeline:
 
         status = self._item_status()
         if status == "待需求人工确认":
-            human_feedback = self._human_gate("1. 需求分析", self.user_requirements_file)
+            human_feedback = self._human_gate("1. 需求分析", self.user_requirements_file, analyst)
             if human_feedback is None:
                 self._set_status("待开发")
                 return
@@ -245,7 +248,7 @@ class Pipeline:
                 )
 
             self._set_status("待需求人工确认")
-            human_feedback = self._human_gate("1. 需求分析", self.user_requirements_file)
+            human_feedback = self._human_gate("1. 需求分析", self.user_requirements_file, analyst)
             if human_feedback is None:
                 self._set_demand_status("开发中")
                 self._set_status("待开发")
@@ -274,7 +277,7 @@ class Pipeline:
         while True:
             status = self._item_status()
             if status == "待人工确认":
-                human_feedback = self._human_gate("2. 代码开发", self.requirement_dir)
+                human_feedback = self._human_gate("2. 代码开发", self.requirement_dir, developer)
                 if human_feedback is None:
                     self._set_status("记忆整理中")
                     break
@@ -313,7 +316,7 @@ class Pipeline:
 
             if review_passed(review_response, "任务完成"):
                 self._set_status("待人工确认")
-                human_feedback = self._human_gate("2. 代码开发", self.requirement_dir)
+                human_feedback = self._human_gate("2. 代码开发", self.requirement_dir, developer)
                 if human_feedback is None:
                     self._set_status("记忆整理中")
                     break
@@ -444,9 +447,9 @@ class Pipeline:
         for name, message in curation_messages.items():
             agent = self.agents.get(name)
             if agent is None:
-                print(f"⚠️  未找到 Agent [{name}]，跳过。")
+                print(f"⚠️  未找到角色为 {name} 的 Agent，跳过。")
                 continue
-            print(f"\n📤 向 Agent [{name}] 发送记忆总结指令...")
+            print(f"\n📤 向 {agent.display_name} 发送记忆总结指令...")
             agent.send_message(message)
 
         print("\n✅ 记忆总结完成。")

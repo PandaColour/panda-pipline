@@ -60,8 +60,11 @@ class BreakPipeline:
         self._pending_human_feedback = {}
         self._pending_requirement_feedback = {}
 
-    def _human_gate(self, stage_name, review_file_path=None):
-        return human_gate(stage_name, review_file_path, skip_human=self.skip_human)
+    def _human_gate(self, stage_name, review_file_path=None, feedback_agent=None):
+        gate_options = {"skip_human": self.skip_human}
+        if feedback_agent is not None:
+            gate_options["feedback_target"] = feedback_agent.display_name
+        return human_gate(stage_name, review_file_path, **gate_options)
 
     def has_resumable_state(self):
         return any(
@@ -197,6 +200,7 @@ class BreakPipeline:
                 f"1. 大需求拆分资源访问阻塞：{summary}",
                 self.requirements_index_file,
                 skip_human=False,
+                feedback_target=breaker.display_name,
             )
             while feedback is None:
                 print("⚠️ 请提供资源处理结果后再继续拆分。")
@@ -204,6 +208,7 @@ class BreakPipeline:
                     f"1. 大需求拆分资源访问阻塞：{summary}",
                     self.requirements_index_file,
                     skip_human=False,
+                    feedback_target=breaker.display_name,
                 )
             response = breaker.send_message(
                 f"用户已处理资源访问阻塞：{feedback}\n"
@@ -247,7 +252,7 @@ class BreakPipeline:
                     break
                 response = breaker.send_message(f"拆分评审意见：{review}\n请更新 {self.requirements_dir}，仅修改拆分产物。")
                 self._resolve_breakdown_resource_blocker(breaker, response)
-            feedback = self._human_gate("1. 大需求拆分", self.requirements_index_file)
+            feedback = self._human_gate("1. 大需求拆分", self.requirements_index_file, breaker)
             if feedback is None:
                 os.makedirs(self.requirements_dir, exist_ok=True)
                 with open(self.breakdown_approval_file, "w", encoding="utf-8") as approval_file:
@@ -292,12 +297,12 @@ class BreakPipeline:
                 self._validate_items(items)
                 continue
             if item.status == "待需求人工确认":
-                self._resume_requirements_human_gate(item)
+                self._resume_requirements_human_gate(item, item_agents["analyst"])
                 items = self._load_items()
                 self._validate_items(items)
                 continue
             if item.status == "待人工确认":
-                self._resume_human_gate(item)
+                self._resume_human_gate(item, item_agents["developer"])
                 items = self._load_items()
                 self._validate_items(items)
                 continue
@@ -354,7 +359,11 @@ class BreakPipeline:
                 self._clear_pending_feedback(item.requirement_id)
                 self._set_status(item.requirement_id, "需求评审中")
             self._set_status(item.requirement_id, "待需求人工确认")
-            feedback = self._human_gate(f"2. 小需求 {item.requirement_id} 需求分析", analysis_report)
+            feedback = self._human_gate(
+                f"2. 小需求 {item.requirement_id} 需求分析",
+                analysis_report,
+                analyst,
+            )
             if feedback is None:
                 self._set_status(item.requirement_id, "待开发")
                 return
@@ -364,8 +373,12 @@ class BreakPipeline:
             self._clear_pending_feedback(item.requirement_id)
             self._set_status(item.requirement_id, "需求评审中")
 
-    def _resume_requirements_human_gate(self, item):
-        feedback = self._human_gate(f"2. 小需求 {item.requirement_id} 需求分析", self._item_paths(item)["requirements_analysis"])
+    def _resume_requirements_human_gate(self, item, analyst):
+        feedback = self._human_gate(
+            f"2. 小需求 {item.requirement_id} 需求分析",
+            self._item_paths(item)["requirements_analysis"],
+            analyst,
+        )
         if feedback is None:
             self._set_status(item.requirement_id, "待开发")
             return
@@ -411,7 +424,7 @@ class BreakPipeline:
                 self._set_status(item.requirement_id, "代码评审中")
                 continue
             self._set_status(item.requirement_id, "待人工确认")
-            feedback = self._human_gate(f"2. 小需求 {item.requirement_id}", requirement_file)
+            feedback = self._human_gate(f"2. 小需求 {item.requirement_id}", requirement_file, developer)
             if feedback is None:
                 self._set_status(item.requirement_id, "记忆整理中")
                 return
@@ -425,9 +438,9 @@ class BreakPipeline:
             self._clear_pending_feedback(item.requirement_id)
             self._set_status(item.requirement_id, "代码评审中")
 
-    def _resume_human_gate(self, item):
+    def _resume_human_gate(self, item, developer):
         requirement_file = self._item_paths(item)["requirements"]
-        feedback = self._human_gate(f"2. 小需求 {item.requirement_id}", requirement_file)
+        feedback = self._human_gate(f"2. 小需求 {item.requirement_id}", requirement_file, developer)
         if feedback is None:
             self._set_status(item.requirement_id, "记忆整理中")
             return

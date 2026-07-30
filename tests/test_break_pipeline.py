@@ -27,6 +27,21 @@ class BreakPipelineTests(unittest.TestCase):
 
         gate.assert_called_once_with("测试", "workspace/requirements/index.md", skip_human=True)
 
+    def test_break_human_gate_uses_feedback_agent_display_name(self):
+        pipeline = BreakPipeline("workspace")
+        feedback_agent = MagicMock()
+        feedback_agent.display_name = "需求拆分agent(codex)"
+
+        with patch("break_pipeline.human_gate", return_value=None) as gate:
+            pipeline._human_gate("测试", "workspace/requirements/index.md", feedback_agent)
+
+        gate.assert_called_once_with(
+            "测试",
+            "workspace/requirements/index.md",
+            skip_human=False,
+            feedback_target="需求拆分agent(codex)",
+        )
+
     def test_item_artifacts_stay_in_its_own_workspace(self):
         pipeline = BreakPipeline("workspace")
         item = RequirementItem(
@@ -441,13 +456,15 @@ class BreakPipelineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as work_dir:
             pipeline = BreakPipeline(work_dir, skip_human=True)
             breaker = MagicMock()
+            breaker.display_name = "需求拆分agent(codex)"
             breaker.send_message.side_effect = [blocked, "拆分已更新"]
             reviewer = MagicMock()
             reviewer.send_message.return_value = "拆分方案通过"
 
-            def human_gate_response(stage_name, _review_file_path, skip_human):
+            def human_gate_response(stage_name, _review_file_path, skip_human, feedback_target=None):
                 if "资源访问阻塞" in stage_name:
                     self.assertFalse(skip_human)
+                    self.assertEqual(feedback_target, "需求拆分agent(codex)")
                     return "已授予读取权限"
                 self.assertTrue(skip_human)
                 return None
@@ -461,6 +478,7 @@ class BreakPipelineTests(unittest.TestCase):
             "1. 大需求拆分资源访问阻塞：无法读取设计文件",
             pipeline.requirements_index_file,
             skip_human=False,
+            feedback_target="需求拆分agent(codex)",
         )
         self.assertIn("已授予读取权限", breaker.send_message.call_args_list[1].args[0])
         reviewer.send_message.assert_called_once()
@@ -799,9 +817,11 @@ class BreakPipelineTests(unittest.TestCase):
             pipeline = BreakPipeline(work_dir)
             self._write_requirement_files(work_dir, "R-001")
             self._write_index(work_dir, [(1, "R-001", "待人工确认", "无", "001-first.md")])
+            developer = MagicMock()
+            developer.display_name = "R-001 小需求开发agent(codex)"
 
             with patch("break_pipeline.human_gate", return_value="修正 R-001"):
-                pipeline._resume_human_gate(pipeline._load_items()[0])
+                pipeline._resume_human_gate(pipeline._load_items()[0], developer)
 
             saved_plan = json.loads(Path(pipeline.execution_plan_file).read_text(encoding="utf-8"))
             self.assertEqual(saved_plan["items"][0]["status"], "开发中")
