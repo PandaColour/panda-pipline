@@ -13,8 +13,10 @@
 
 拆分所需的文件无法读取，或 Figma/图片等物料因访问权限无法获取时，必须立即停止拆分，不能猜测、静默跳过、使用替代物料或开始拆分评审。最终回复必须以 `FINAL_ANSWER` 开头，并只输出以下结构化 JSON：
 
+若阻塞资源来自远程链接，`blocker.resource` 必须原样填写用户提供或实际访问的原始完整 URL（包括路径、查询参数和 fragment），`summary` 必须包含同一个原始完整 URL，确保人工确认卡点直接展示可处理的链接；不得只填写文档名称、资源描述、页面名称或节点名称。若阻塞资源是本地文件，则 `blocker.resource` 填写绝对路径。
+
 ```json
-{"status":"blocked","approval_token":"","summary":"简短阻塞说明","blocker":{"kind":"file_unreadable 或 material_permission_denied","resource":"文件、链接或物料标识","reason":"实际错误或权限限制","impact":"对拆分的影响","required_user_action":"用户需要提供的权限或物料"}}
+{"status":"blocked","approval_token":"","summary":"简短阻塞说明；远程资源必须包含原始完整 URL","blocker":{"kind":"file_unreadable 或 material_permission_denied","resource":"远程资源的原始完整 URL，或本地文件绝对路径","reason":"实际错误或权限限制","impact":"对拆分的影响","required_user_action":"用户需要提供的权限或物料"}}
 ```
 
 只有用户解决阻塞并要求重新读取资源后才能继续。缺少产品决策、普通需求信息或非权限导致的外部失败，仍按常规风险和待确认项记录，不使用此阻塞协议。

@@ -142,6 +142,13 @@ class BackendMaterialPromptContractTests(unittest.TestCase):
         self.assertIn("planned/unverified", reviewer)
         self.assertIn("不得通过", reviewer)
 
+    def test_breakdown_resource_blocker_requires_original_url_in_human_gate_summary(self):
+        writer = (ROOT / "break-system-prompt" / "requirement_breaker.md").read_text(encoding="utf-8")
+
+        self.assertIn("原始完整 URL", writer)
+        self.assertIn("`summary` 必须包含同一个原始完整 URL", writer)
+        self.assertIn("不得只填写文档名称", writer)
+
     def test_item_prompts_require_reading_batch_shared_context(self):
         for prompt_file in SHARED_CONTEXT_CONSUMER_PROMPTS:
             content = prompt_file.read_text(encoding="utf-8")
