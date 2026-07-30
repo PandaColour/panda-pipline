@@ -310,13 +310,13 @@ class BreakPipelineTests(unittest.TestCase):
             pipeline = BreakPipeline(work_dir)
             self._write_requirement_files(work_dir, "R-001")
             self._write_index(work_dir, [(1, "R-001", "待实施", "无", "001-first.md")])
-            previous_cursor = Agent._STRATEGY_MAP["cursor"]
-            Agent._STRATEGY_MAP["cursor"] = SessionReturningAgent
+            previous_codex = Agent._STRATEGY_MAP["codex"]
+            Agent._STRATEGY_MAP["codex"] = SessionReturningAgent
             try:
                 agent = pipeline._create_agent("R-001 小需求开发", "item_developer.md")
                 agent.send_message("开发")
             finally:
-                Agent._STRATEGY_MAP["cursor"] = previous_cursor
+                Agent._STRATEGY_MAP["codex"] = previous_codex
 
             plan = json.loads(Path(pipeline.execution_plan_file).read_text(encoding="utf-8"))
             self.assertEqual(
@@ -324,7 +324,7 @@ class BreakPipelineTests(unittest.TestCase):
                 "restored-session",
             )
 
-    def test_item_agent_session_is_restored_after_restart(self):
+    def test_item_agent_session_backend_mismatch_starts_fresh(self):
         with tempfile.TemporaryDirectory() as work_dir:
             pipeline = BreakPipeline(work_dir)
             self._write_requirement_files(work_dir, "R-001")
@@ -339,10 +339,76 @@ class BreakPipelineTests(unittest.TestCase):
             }
             Path(pipeline.execution_plan_file).write_text(json.dumps(plan, ensure_ascii=False), encoding="utf-8")
 
+            previous_codex = Agent._STRATEGY_MAP["codex"]
+            Agent._STRATEGY_MAP["codex"] = SessionReturningAgent
+            try:
+                restarted = BreakPipeline(work_dir)
+                agent = restarted._create_agent("R-001 小需求开发", "item_developer.md")
+                self.assertIsNone(agent.session_id)
+                agent.send_message("开发")
+            finally:
+                Agent._STRATEGY_MAP["codex"] = previous_codex
+
+            self.assertEqual(agent.session_id, "restored-session")
+            plan = json.loads(Path(restarted.execution_plan_file).read_text(encoding="utf-8"))
+            session = plan["items"][0]["agent_sessions"]["R-001 小需求开发"]
+            self.assertEqual(session["session_id"], "restored-session")
+            self.assertEqual(session["agent_type"], "codex")
+
+    def test_item_agent_session_matching_backend_is_restored(self):
+        with tempfile.TemporaryDirectory() as work_dir:
+            pipeline = BreakPipeline(work_dir)
+            self._write_requirement_files(work_dir, "R-001")
+            self._write_index(work_dir, [(1, "R-001", "待实施", "无", "001-first.md")])
+            plan = json.loads(Path(pipeline.execution_plan_file).read_text(encoding="utf-8"))
+            plan["items"][0]["agent_sessions"] = {
+                "R-001 小需求开发": {
+                    "session_id": "saved-session",
+                    "agent_type": "codex",
+                    "prompt_file": "item_developer.md",
+                }
+            }
+            Path(pipeline.execution_plan_file).write_text(json.dumps(plan, ensure_ascii=False), encoding="utf-8")
+
             restarted = BreakPipeline(work_dir)
             agent = restarted._create_agent("R-001 小需求开发", "item_developer.md")
 
             self.assertEqual(agent.session_id, "saved-session")
+
+    def test_item_agent_legacy_session_without_backend_is_restored(self):
+        with tempfile.TemporaryDirectory() as work_dir:
+            pipeline = BreakPipeline(work_dir)
+            self._write_requirement_files(work_dir, "R-001")
+            self._write_index(work_dir, [(1, "R-001", "待实施", "无", "001-first.md")])
+            plan = json.loads(Path(pipeline.execution_plan_file).read_text(encoding="utf-8"))
+            plan["items"][0]["agent_sessions"] = {
+                "R-001 小需求开发": {
+                    "session_id": "legacy-session",
+                    "prompt_file": "item_developer.md",
+                }
+            }
+            Path(pipeline.execution_plan_file).write_text(json.dumps(plan, ensure_ascii=False), encoding="utf-8")
+
+            restarted = BreakPipeline(work_dir)
+            agent = restarted._create_agent("R-001 小需求开发", "item_developer.md")
+
+            self.assertEqual(agent.session_id, "legacy-session")
+
+    def test_item_agent_legacy_string_session_is_restored(self):
+        with tempfile.TemporaryDirectory() as work_dir:
+            pipeline = BreakPipeline(work_dir)
+            self._write_requirement_files(work_dir, "R-001")
+            self._write_index(work_dir, [(1, "R-001", "待实施", "无", "001-first.md")])
+            plan = json.loads(Path(pipeline.execution_plan_file).read_text(encoding="utf-8"))
+            plan["items"][0]["agent_sessions"] = {
+                "R-001 小需求开发": "legacy-string-session",
+            }
+            Path(pipeline.execution_plan_file).write_text(json.dumps(plan, ensure_ascii=False), encoding="utf-8")
+
+            restarted = BreakPipeline(work_dir)
+            agent = restarted._create_agent("R-001 小需求开发", "item_developer.md")
+
+            self.assertEqual(agent.session_id, "legacy-string-session")
 
     def test_demand_agent_session_is_saved_and_restored(self):
         with tempfile.TemporaryDirectory() as work_dir:
@@ -350,13 +416,13 @@ class BreakPipelineTests(unittest.TestCase):
             self._write_requirement_files(work_dir, "R-001")
             self._write_index(work_dir, [(1, "R-001", "待实施", "无", "001-first.md")])
             pipeline._set_demand_status("拆分中", source="大需求")
-            previous_cursor = Agent._STRATEGY_MAP["cursor"]
-            Agent._STRATEGY_MAP["cursor"] = SessionReturningAgent
+            previous_codex = Agent._STRATEGY_MAP["codex"]
+            Agent._STRATEGY_MAP["codex"] = SessionReturningAgent
             try:
                 agent = pipeline._create_agent("需求拆分", "requirement_breaker.md")
                 agent.send_message("拆分")
             finally:
-                Agent._STRATEGY_MAP["cursor"] = previous_cursor
+                Agent._STRATEGY_MAP["codex"] = previous_codex
 
             plan = json.loads(Path(pipeline.execution_plan_file).read_text(encoding="utf-8"))
             self.assertEqual(plan["demand"]["agent_sessions"]["需求拆分"]["session_id"], "restored-session")
@@ -364,6 +430,71 @@ class BreakPipelineTests(unittest.TestCase):
             restarted = BreakPipeline(work_dir)
             restored = restarted._create_agent("需求拆分", "requirement_breaker.md")
             self.assertEqual(restored.session_id, "restored-session")
+
+    def test_breakdown_resource_blocker_forces_human_gate_before_review(self):
+        blocked = (
+            "FINAL_ANSWER\n```json\n"
+            '{"status":"blocked","approval_token":"","summary":"无法读取设计文件",'
+            '"blocker":{"kind":"file_unreadable","resource":"/tmp/design.fig",'
+            '"reason":"permission denied","required_user_action":"授予读取权限"}}\n```'
+        )
+        with tempfile.TemporaryDirectory() as work_dir:
+            pipeline = BreakPipeline(work_dir, skip_human=True)
+            breaker = MagicMock()
+            breaker.send_message.side_effect = [blocked, "拆分已更新"]
+            reviewer = MagicMock()
+            reviewer.send_message.return_value = "拆分方案通过"
+
+            def human_gate_response(stage_name, _review_file_path, skip_human):
+                if "资源访问阻塞" in stage_name:
+                    self.assertFalse(skip_human)
+                    return "已授予读取权限"
+                self.assertTrue(skip_human)
+                return None
+
+            with patch.object(pipeline, "_create_agent", side_effect=[breaker, reviewer]), \
+                    patch("break_pipeline.human_gate", side_effect=human_gate_response) as gate, \
+                    patch("builtins.print") as output:
+                pipeline._run_breakdown("大需求")
+
+        gate.assert_any_call(
+            "1. 大需求拆分资源访问阻塞：无法读取设计文件",
+            pipeline.requirements_index_file,
+            skip_human=False,
+        )
+        self.assertIn("已授予读取权限", breaker.send_message.call_args_list[1].args[0])
+        reviewer.send_message.assert_called_once()
+        printed = "\n".join(str(call.args[0]) for call in output.call_args_list if call.args)
+        self.assertIn("/tmp/design.fig", printed)
+        self.assertIn("permission denied", printed)
+        self.assertIn("授予读取权限", printed)
+
+    def test_breakdown_gate_ignores_unrelated_blocked_result(self):
+        response = (
+            "FINAL_ANSWER\n```json\n"
+            '{"status":"blocked","approval_token":"","summary":"等待产品决策",'
+            '"blocker":{"kind":"product_decision"}}\n```'
+        )
+
+        self.assertIsNone(BreakPipeline._breakdown_resource_blocker(response))
+
+    def test_breakdown_gate_ignores_unmarked_blocked_json(self):
+        response = (
+            "拆分过程记录：\n```json\n"
+            '{"status":"blocked","approval_token":"","summary":"无法读取设计文件",'
+            '"blocker":{"kind":"file_unreadable"}}\n```'
+        )
+
+        self.assertIsNone(BreakPipeline._breakdown_resource_blocker(response))
+
+    def test_breakdown_gate_ignores_incomplete_resource_blocker(self):
+        response = (
+            "FINAL_ANSWER\n```json\n"
+            '{"status":"blocked","approval_token":"","summary":"无法读取设计文件",'
+            '"blocker":{"kind":"file_unreadable","resource":"/tmp/design.fig"}}\n```'
+        )
+
+        self.assertIsNone(BreakPipeline._breakdown_resource_blocker(response))
 
     def test_breakdown_retries_reviewer_and_human_feedback(self):
         with tempfile.TemporaryDirectory() as work_dir:

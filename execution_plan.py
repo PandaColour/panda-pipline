@@ -143,7 +143,7 @@ class ExecutionPlanStore:
         }
         self.write(plan)
 
-    def get_agent_session(self, agent_name, *, requirement_id=None):
+    def get_agent_session(self, agent_name, *, requirement_id=None, agent_type=None):
         plan = self.read()
         self.normalize_plan(plan, None)
         targets = []
@@ -160,6 +160,9 @@ class ExecutionPlanStore:
             if isinstance(record, str):
                 return record
             if isinstance(record, dict) and isinstance(record.get("session_id"), str):
+                saved_agent_type = record.get("agent_type")
+                if agent_type and saved_agent_type and saved_agent_type != agent_type:
+                    return None
                 return record["session_id"]
         return None
 

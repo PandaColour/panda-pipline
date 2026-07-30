@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 from agents import Agent
 from execution_plan import ExecutionPlanStore
-from review_decision import review_passed, structured_review_decision
+from review_decision import review_passed, structured_final_answer_decision, structured_review_decision
 from workflow import human_gate
 
 
@@ -74,8 +74,8 @@ class BreakPipeline:
         )
 
     def _create_agent(self, name, prompt_file):
-        agent_type = "cursor"
-        session_id = self._agent_session_id(name)
+        agent_type = "codex"
+        session_id = self._agent_session_id(name, agent_type)
         agent = Agent(
             name,
             prompt_file,
@@ -104,11 +104,12 @@ class BreakPipeline:
             missing_key = error.args[0]
             raise ValueError(f"Prompt template {prompt_file} missing placeholder value: {missing_key}") from error
 
-    def _agent_session_id(self, agent_name):
+    def _agent_session_id(self, agent_name, agent_type):
         try:
             return self.execution_plan.get_agent_session(
                 agent_name,
                 requirement_id=self._agent_requirement_id(agent_name),
+                agent_type=agent_type,
             )
         except ValueError:
             return None
@@ -164,6 +165,53 @@ class BreakPipeline:
                 self._archive_completed_requirements()
             print("\n🎉🎉🎉 【拆分流水线圆满完成】所有小需求均已通过！")
 
+    @staticmethod
+    def _breakdown_resource_blocker(response):
+        if not isinstance(response, str):
+            return None
+        decision = structured_final_answer_decision(response, {"blocked"})
+        if decision is None:
+            return None
+        blocker = decision.get("blocker")
+        if not isinstance(blocker, dict):
+            return None
+        if blocker.get("kind") not in {"file_unreadable", "material_permission_denied"}:
+            return None
+        if not all(
+            isinstance(blocker.get(field), str) and blocker[field].strip()
+            for field in ("resource", "reason", "required_user_action")
+        ):
+            return None
+        return {**blocker, "summary": decision.get("summary")}
+
+    def _resolve_breakdown_resource_blocker(self, breaker, response):
+        while blocker := self._breakdown_resource_blocker(response):
+            summary = blocker.get("summary") or blocker.get("reason") or "拆分所需资源不可访问"
+            print(
+                "⚠️ 拆分资源访问阻塞："
+                f"资源={blocker.get('resource') or '未提供'}；"
+                f"原因={blocker.get('reason') or '未提供'}；"
+                f"需要用户处理={blocker.get('required_user_action') or '未提供'}"
+            )
+            feedback = human_gate(
+                f"1. 大需求拆分资源访问阻塞：{summary}",
+                self.requirements_index_file,
+                skip_human=False,
+            )
+            while feedback is None:
+                print("⚠️ 请提供资源处理结果后再继续拆分。")
+                feedback = human_gate(
+                    f"1. 大需求拆分资源访问阻塞：{summary}",
+                    self.requirements_index_file,
+                    skip_human=False,
+                )
+            response = breaker.send_message(
+                f"用户已处理资源访问阻塞：{feedback}\n"
+                "请重新读取所需文件或物料并更新拆分产物；若仍无法读取文件或因权限无法获取物料，"
+                "请继续按资源访问阻塞协议报告。"
+            )
+        return response
+
     def _run_breakdown(self, user_idea=None):
         print("\n" + "=" * 60 + "\n📋 阶段 1: 大需求拆分\n" + "=" * 60)
         has_existing_index = os.path.isfile(self.requirements_index_file)
@@ -183,7 +231,8 @@ class BreakPipeline:
         breaker = self._create_agent("需求拆分", "requirement_breaker.md")
         reviewer = self._create_agent("拆分评审", "requirement_break_reviewer.md")
         if initial_breakdown_message:
-            breaker.send_message(initial_breakdown_message)
+            response = breaker.send_message(initial_breakdown_message)
+            self._resolve_breakdown_resource_blocker(breaker, response)
         while True:
             self._set_demand_status("拆分评审中", source=user_idea)
             for attempt in range(1, MAX_REQUIREMENT_REVIEW_ATTEMPTS + 1):
@@ -196,7 +245,8 @@ class BreakPipeline:
                 if attempt >= MAX_REQUIREMENT_REVIEW_ATTEMPTS:
                     print("⚠️ 拆分评审连续 3 次未通过，按策略自动进入人工确认，让后续流程先完成可完成内容。")
                     break
-                breaker.send_message(f"拆分评审意见：{review}\n请更新 {self.requirements_dir}，仅修改拆分产物。")
+                response = breaker.send_message(f"拆分评审意见：{review}\n请更新 {self.requirements_dir}，仅修改拆分产物。")
+                self._resolve_breakdown_resource_blocker(breaker, response)
             feedback = self._human_gate("1. 大需求拆分", self.requirements_index_file)
             if feedback is None:
                 os.makedirs(self.requirements_dir, exist_ok=True)
@@ -204,7 +254,8 @@ class BreakPipeline:
                     approval_file.write("approved\n")
                 self._set_demand_status("开发中", source=user_idea)
                 return
-            breaker.send_message(f"人工审核意见：{feedback}\n请更新 {self.requirements_dir}，然后等待重新评审。")
+            response = breaker.send_message(f"人工审核意见：{feedback}\n请更新 {self.requirements_dir}，然后等待重新评审。")
+            self._resolve_breakdown_resource_blocker(breaker, response)
 
     def _breakdown_instruction(self, user_idea):
         return (
