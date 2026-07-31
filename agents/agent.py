@@ -26,6 +26,7 @@ class Agent:
         prompt_dir=None,
         session_id=None,
         session_update_callback=None,
+        status_provider=None,
     ):
         self.name = name
         self.work_dir = work_dir
@@ -38,6 +39,7 @@ class Agent:
         self.agent_type = agent_type
         self.agent_impl = self._create_strategy(agent_type)
         self.session_update_callback = session_update_callback
+        self.status_provider = status_provider
 
     @classmethod
     def register_backend(cls, name, strategy_cls):
@@ -66,11 +68,23 @@ class Agent:
     def display_name(self):
         return f"{self.name}agent({self.agent_type})"
 
+    @property
+    def current_status(self):
+        if not callable(self.status_provider):
+            return None
+        try:
+            status = self.status_provider()
+        except (KeyError, OSError, ValueError):
+            return None
+        return status.strip() if isinstance(status, str) and status.strip() else None
+
     def send_message(self, message):
         """Send one turn and resume this instance's explicit provider session."""
         self.call_count += 1
+        status = self.current_status
+        status_text = f" — 当前状态: {status}" if status else ""
         print(f"\n{'=' * 60}")
-        print(f"🤖 {self.display_name} — 第 {self.call_count} 次调用")
+        print(f"🤖 {self.display_name}{status_text} — 第 {self.call_count} 次调用")
         print(f"{'=' * 60}")
 
         result = self.agent_impl.run(

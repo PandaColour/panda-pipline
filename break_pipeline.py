@@ -93,9 +93,32 @@ class BreakPipeline:
                 agent_type,
                 new_session_id,
             ),
+            status_provider=lambda: self._agent_status(name),
         )
         self.agents[name] = agent
         return agent
+
+    def _agent_status(self, agent_name):
+        try:
+            plan = self.execution_plan.read()
+        except (OSError, ValueError):
+            return None
+
+        requirement_id = self._agent_requirement_id(agent_name)
+        if requirement_id:
+            status = next(
+                (
+                    item.get("status")
+                    for item in plan.get("items", [])
+                    if isinstance(item, dict) and item.get("id") == requirement_id
+                ),
+                None,
+            )
+        else:
+            status = plan.get("demand", {}).get("status")
+
+        status = ExecutionPlanStore.normalize_status(status, VALID_STATUSES)
+        return status if status in VALID_STATUSES else None
 
     def _render_break_prompt(self, prompt_file, **values):
         template_path = os.path.join(self.prompt_dir, prompt_file)

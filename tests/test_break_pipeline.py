@@ -295,8 +295,11 @@ class BreakPipelineTests(unittest.TestCase):
     def test_create_agent_uses_break_prompt_directory(self):
         pipeline = BreakPipeline("workspace")
 
-        with patch("break_pipeline.Agent") as agent_class:
+        with patch.object(pipeline, "_agent_status", return_value="代码评审中") as agent_status, \
+                patch("break_pipeline.Agent") as agent_class:
             pipeline._create_agent("需求拆分", "requirement_breaker.md")
+            self.assertEqual(agent_class.call_args.kwargs["status_provider"](), "代码评审中")
+            agent_status.assert_called_once_with("需求拆分")
 
         self.assertEqual(
             agent_class.call_args.kwargs["prompt_dir"],

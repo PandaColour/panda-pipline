@@ -77,18 +77,18 @@ class PipelinePathTests(unittest.TestCase):
     def test_create_agent_always_uses_pipeline_root(self):
         pipeline = Pipeline("relative-workspace")
 
-        with patch("pipeline.Agent") as agent_class:
+        with patch.object(pipeline, "_agent_status", return_value="开发中") as agent_status, \
+                patch("pipeline.Agent") as agent_class:
             created = pipeline._create_agent("需求分析", "requirements_analyst.md")
 
         self.assertIsNotNone(created)
-        agent_class.assert_called_once_with(
-            "需求分析",
-            "requirements_analyst.md",
-            pipeline.work_dir,
-            add_dirs=None,
-            agent_type="cursor",
-            prompt_dir=pipeline.prompt_dir,
-        )
+        call = agent_class.call_args
+        self.assertEqual(call.args, ("需求分析", "requirements_analyst.md", pipeline.work_dir))
+        self.assertEqual(call.kwargs["add_dirs"], None)
+        self.assertEqual(call.kwargs["agent_type"], "cursor")
+        self.assertEqual(call.kwargs["prompt_dir"], pipeline.prompt_dir)
+        self.assertEqual(call.kwargs["status_provider"](), "开发中")
+        agent_status.assert_called_once_with()
 
     def test_memory_curation_template_lives_in_system_prompt(self):
         template = Path(SYSTEM_PROMPT_DIR) / "memory_curation.md"

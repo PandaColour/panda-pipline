@@ -65,9 +65,17 @@ class Pipeline:
             add_dirs=None,
             agent_type="cursor",
             prompt_dir=self.prompt_dir,
+            status_provider=self._agent_status,
         )
         self.agents[name] = agent
         return agent
+
+    def _agent_status(self):
+        try:
+            status = self._item_status()
+        except (OSError, ValueError):
+            return None
+        return status if status in VALID_STATUSES else None
 
     def _render_system_prompt(self, prompt_file, **values):
         template_path = os.path.join(self.prompt_dir, prompt_file)
