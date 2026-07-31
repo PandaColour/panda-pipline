@@ -188,6 +188,25 @@ class BackendMaterialPromptContractTests(unittest.TestCase):
         self.assertIn("应输出 `approved`", reviewer)
         self.assertNotIn("status=requirement_change", reviewer)
 
+    def test_item_requirement_prompts_allow_documented_conservative_product_decisions(self):
+        prompt_files = [
+            ROOT / "break-system-prompt" / "item_requirements_analyst.md",
+            ROOT / "break-system-prompt" / "item_requirements_reviewer.md",
+        ]
+        for prompt_file in prompt_files:
+            content = prompt_file.read_text(encoding="utf-8")
+            self.assertIn("Agent 保守决策", content, prompt_file.name)
+            self.assertIn("明确的“暂不开发”优先于“开发完整版”", content, prompt_file.name)
+            self.assertIn("保持既有线上行为", content, prompt_file.name)
+            self.assertIn("新入口默认隐藏", content, prompt_file.name)
+            self.assertIn("资金、安全、隐私或不可逆操作必须 fail-closed", content, prompt_file.name)
+            self.assertIn("Feature Flag", content, prompt_file.name)
+            self.assertIn("恢复条件", content, prompt_file.name)
+
+        reviewer = prompt_files[1].read_text(encoding="utf-8")
+        self.assertIn("不得仅因缺少产品负责人逐项签署而不通过", reviewer)
+        self.assertIn("应输出 `approved`", reviewer)
+
     def test_ui_requirement_analysis_prompts_require_figma_reference_screens_and_visual_baseline(self):
         prompt_files = [
             ROOT / "system-prompt" / "requirements_analyst.md",
