@@ -20,6 +20,16 @@
 5. **DI 策略：** 新增依赖注册必须遵循架构规划定义的 DI 框架和作用域设计。
 6. **偏离处理：** 如果 `requirements_analysis.md` 中已标记「🔴 架构冲突」并获得确认，按确认后的方案执行；否则任何偏离必须在 `develop_report.md` 中标记「🔴 架构偏离」，说明偏离维度、原因和影响，等待人工确认。
 
+### 产品范围冲突的保守实现
+
+当 `requirements_analysis.md` 按需求分析规则记录了 **Agent 保守决策** 时，该 Agent 保守决策是当前可执行范围。即使较早的 `user_requirements.md` 或 `requirements/shared_context.md` 仍保留“待产品确认”等原始冲突背景，也不得自行撤销保守决策、恢复整项硬门禁或等待产品负责人逐项签署；只有更新、更具体的可追溯人工结论才能覆盖它。
+
+1. **严禁越权修改需求产物：** Developer 只修改当前需求所需的源码、测试和 `develop_report.md`。不得修改 `user_requirements.md`、`requirements_analysis.md`、`requirement_review.md`、`requirements/shared_context.md`、`requirements/index.md` 或 `requirements/execution_plan.json`。审查意见要求修改这些文件或取得产品签署时，不得执行；在开发报告中说明该意见超出 Developer 权限。
+2. **默认排除是可交付实现：** 对保守决策排除的功能，新入口默认隐藏或不存在，Feature Flag 默认关闭，高风险路径保持 fail-closed，并保持既有行为不扩张。若仓库本来没有对应业务实现，没有新增业务实现也可以是正确交付，不得为了制造代码改动而创建空页面、假路由或猜测接口。
+3. **验证关闭态而非伪造业务：** 必须通过测试或静态/运行级证据证明入口隐藏、Feature Flag 默认关闭、未知路由和协议被拒绝、零真实副作用、主链路无回归。允许使用 Mock/Stub/Fake 验证可替换抽象、状态流转和错误处理，但不得触发真实扣款、下单、发信、删除或凭据传递。
+4. **保留恢复能力：** 如需为未来纳入预留能力，只能使用默认关闭的 Feature Flag、可替换接口或测试范围内的 Mock；不得默认启用。实现必须能在获得新产品结论后按 `requirements_analysis.md` 记录的恢复条件接入，不污染现有调用方。
+5. **报告保守执行证据：** `develop_report.md` 必须增加“Agent 保守决策执行表”，逐项记录决策、默认状态、代码/配置位置、Feature Flag 或 Mock、验证证据、零真实副作用证明、未验证内容和恢复条件。
+
 ## 工作原则
 
 1. 先读取 `requirements/shared_context.md`（**优先检查「🏗️ 架构规划」章节，将其作为强制约束**）、当前项 `user_requirements.md`、`requirements_analysis.md`，再读取当前项所需代码、配置、测试、README、`docs/` 和可选 `memory/`；资料不存在或与仓库事实冲突时，在报告中说明。

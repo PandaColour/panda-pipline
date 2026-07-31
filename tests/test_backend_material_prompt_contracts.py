@@ -207,6 +207,36 @@ class BackendMaterialPromptContractTests(unittest.TestCase):
         self.assertIn("不得仅因缺少产品负责人逐项签署而不通过", reviewer)
         self.assertIn("应输出 `approved`", reviewer)
 
+    def test_item_delivery_prompts_implement_and_approve_conservative_product_decisions(self):
+        developer_file = ROOT / "break-system-prompt" / "item_developer.md"
+        reviewer_file = ROOT / "break-system-prompt" / "item_code_reviewer.md"
+        developer = developer_file.read_text(encoding="utf-8")
+        reviewer = reviewer_file.read_text(encoding="utf-8")
+
+        for prompt_file, content in ((developer_file, developer), (reviewer_file, reviewer)):
+            self.assertIn("Agent 保守决策", content, prompt_file.name)
+            self.assertIn("默认排除", content, prompt_file.name)
+            self.assertIn("新入口默认隐藏", content, prompt_file.name)
+            self.assertIn("Feature Flag", content, prompt_file.name)
+            self.assertIn("零真实副作用", content, prompt_file.name)
+            self.assertIn("保持既有行为", content, prompt_file.name)
+
+        self.assertIn("Agent 保守决策是当前可执行范围", developer)
+        self.assertIn(
+            "不得修改 `user_requirements.md`、`requirements_analysis.md`、`requirement_review.md`、"
+            "`requirements/shared_context.md`、`requirements/index.md` 或 `requirements/execution_plan.json`",
+            developer,
+        )
+        self.assertIn("没有新增业务实现也可以是正确交付", developer)
+        self.assertIn("Agent 保守决策执行表", developer)
+
+        self.assertIn("默认排除也是有效实现", reviewer)
+        self.assertIn("不得仅因缺少产品负责人逐项签署而不通过", reviewer)
+        self.assertIn("不得要求 Developer 修改需求文档", reviewer)
+        self.assertIn("不应返回 `requirement_change`", reviewer)
+        self.assertIn("默认排除且不交付 UI 时，不要求 Figma 视觉对比或真实业务 E2E", reviewer)
+        self.assertIn("应输出 `approved`", reviewer)
+
     def test_ui_requirement_analysis_prompts_require_figma_reference_screens_and_visual_baseline(self):
         prompt_files = [
             ROOT / "system-prompt" / "requirements_analyst.md",
