@@ -163,6 +163,18 @@ class BackendMaterialPromptContractTests(unittest.TestCase):
             self.assertIn("接口连通性验证", content, prompt_file.name)
             self.assertIn("无法验证", content, prompt_file.name)
 
+    def test_breakdown_prompts_do_not_block_whole_requirement_for_unavailable_external_service(self):
+        prompt_files = [
+            ROOT / "break-system-prompt" / "requirement_breaker.md",
+            ROOT / "break-system-prompt" / "item_requirements_analyst.md",
+        ]
+        for prompt_file in prompt_files:
+            content = prompt_file.read_text(encoding="utf-8")
+            self.assertIn("外部服务不可用不得阻塞整个需求", content, prompt_file.name)
+            self.assertIn("Mock/Stub/Fake", content, prompt_file.name)
+            self.assertIn("独立延期/门禁需求", content, prompt_file.name)
+            self.assertIn("不得猜测协议或安全策略", content, prompt_file.name)
+
     def test_ui_requirement_analysis_prompts_require_figma_reference_screens_and_visual_baseline(self):
         prompt_files = [
             ROOT / "system-prompt" / "requirements_analyst.md",
@@ -252,6 +264,17 @@ class BackendMaterialPromptContractTests(unittest.TestCase):
             self.assertIn("mock 网络请求", content, prompt_file.name)
             self.assertIn("开发测试验证", content, prompt_file.name)
             self.assertIn("不得通过", content, prompt_file.name)
+
+    def test_item_code_reviewer_routes_external_blockers_without_developer_rework_loop(self):
+        prompt_file = ROOT / "break-system-prompt" / "item_code_reviewer.md"
+        content = prompt_file.read_text(encoding="utf-8")
+
+        self.assertIn("外部服务不可用不得阻塞代码审查通过", content)
+        self.assertIn("不得把取得外部签收、恢复服务或提供业务审批令牌作为 developer 的修改项", content)
+        self.assertIn("无法由代码、测试或报告修改解决", content)
+        self.assertIn("status=requirement_change", content)
+        self.assertIn("不得重复返回 changes_requested", content)
+        self.assertIn("不得猜测协议或安全策略", content)
 
     def test_code_review_prompts_block_missing_minimum_smoke_tests(self):
         for prompt_file in CODE_REVIEW_PROMPTS:
