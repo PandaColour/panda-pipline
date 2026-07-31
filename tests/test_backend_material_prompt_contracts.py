@@ -164,16 +164,29 @@ class BackendMaterialPromptContractTests(unittest.TestCase):
             self.assertIn("无法验证", content, prompt_file.name)
 
     def test_breakdown_prompts_do_not_block_whole_requirement_for_unavailable_external_service(self):
+        breaker = (ROOT / "break-system-prompt" / "requirement_breaker.md").read_text(encoding="utf-8")
+        self.assertIn("外部服务不可用不得阻塞整个需求", breaker)
+        self.assertIn("Mock/Stub/Fake", breaker)
+        self.assertIn("独立延期/门禁需求", breaker)
+        self.assertIn("不得猜测协议或安全策略", breaker)
+
+    def test_item_requirement_prompts_allow_mock_when_development_environment_is_blocked(self):
         prompt_files = [
-            ROOT / "break-system-prompt" / "requirement_breaker.md",
             ROOT / "break-system-prompt" / "item_requirements_analyst.md",
+            ROOT / "break-system-prompt" / "item_requirements_reviewer.md",
         ]
         for prompt_file in prompt_files:
             content = prompt_file.read_text(encoding="utf-8")
-            self.assertIn("外部服务不可用不得阻塞整个需求", content, prompt_file.name)
+            self.assertIn("开发环境阻塞不得作为整项需求门禁", content, prompt_file.name)
+            self.assertIn("后端服务异常", content, prompt_file.name)
+            self.assertIn("VPN", content, prompt_file.name)
             self.assertIn("Mock/Stub/Fake", content, prompt_file.name)
-            self.assertIn("独立延期/门禁需求", content, prompt_file.name)
-            self.assertIn("不得猜测协议或安全策略", content, prompt_file.name)
+            self.assertIn("真实联调未验证", content, prompt_file.name)
+
+        reviewer = prompt_files[1].read_text(encoding="utf-8")
+        self.assertIn("不得仅因缺少真实端到端验证而不通过", reviewer)
+        self.assertIn("应输出 `approved`", reviewer)
+        self.assertNotIn("status=requirement_change", reviewer)
 
     def test_ui_requirement_analysis_prompts_require_figma_reference_screens_and_visual_baseline(self):
         prompt_files = [
