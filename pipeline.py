@@ -2,7 +2,7 @@ import os
 from agents import Agent
 from config import SYSTEM_PROMPT_DIR
 from execution_plan import ExecutionPlanStore
-from review_decision import review_passed
+from review_decision import review_passed, structured_final_answer_decision
 from workflow import human_gate
 
 MAX_REQUIREMENT_REVIEW_ATTEMPTS = 3
@@ -50,6 +50,57 @@ class Pipeline:
         if feedback_agent is not None:
             gate_options["feedback_target"] = feedback_agent.display_name
         return human_gate(stage_name, review_file_path, **gate_options)
+
+    @staticmethod
+    def _resource_blocker(response):
+        """Detect a resource-access blocked response from the analyst."""
+        if not isinstance(response, str):
+            return None
+        decision = structured_final_answer_decision(response, {"blocked"})
+        if decision is None:
+            return None
+        blocker = decision.get("blocker")
+        if not isinstance(blocker, dict):
+            return None
+        if blocker.get("kind") not in {"file_unreadable", "material_permission_denied"}:
+            return None
+        if not all(
+            isinstance(blocker.get(field), str) and blocker[field].strip()
+            for field in ("resource", "reason", "required_user_action")
+        ):
+            return None
+        return {**blocker, "summary": decision.get("summary")}
+
+    def _resolve_resource_blocker(self, analyst, response):
+        """Force human intervention for resource access issues (不受 --skipHuman 影响)."""
+        while blocker := self._resource_blocker(response):
+            summary = blocker.get("summary") or blocker.get("reason") or "需求分析所需资源不可访问"
+            print(
+                "⚠️ 资源访问阻塞："
+                f"资源={blocker.get('resource') or '未提供'}；"
+                f"原因={blocker.get('reason') or '未提供'}；"
+                f"需要用户处理={blocker.get('required_user_action') or '未提供'}"
+            )
+            feedback = human_gate(
+                f"1. 需求分析资源访问阻塞：{summary}",
+                self.user_requirements_file,
+                skip_human=False,
+                feedback_target=analyst.display_name,
+            )
+            while feedback is None:
+                print("⚠️ 请提供资源处理结果后再继续。")
+                feedback = human_gate(
+                    f"1. 需求分析资源访问阻塞：{summary}",
+                    self.user_requirements_file,
+                    skip_human=False,
+                    feedback_target=analyst.display_name,
+                )
+            response = analyst.send_message(
+                f"用户已处理资源访问阻塞：{feedback}\n"
+                "请重新读取所需文件或物料并更新需求文档；若仍无法读取文件或因权限无法获取物料，"
+                "请继续按资源访问阻塞协议报告。"
+            )
+        return response
 
     def has_resumable_state(self):
         plan = self._valid_existing_plan()
@@ -223,7 +274,8 @@ class Pipeline:
             feedback = self._pending_feedback_message()
             if feedback:
                 analysis_prompt += f"待处理反馈：{feedback}"
-            analyst.send_message(analysis_prompt)
+            analyst_response = analyst.send_message(analysis_prompt)
+            analyst_response = self._resolve_resource_blocker(analyst, analyst_response)
             self._clear_pending_feedback()
             self._set_status("需求评审中")
 
