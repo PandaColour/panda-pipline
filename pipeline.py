@@ -167,6 +167,7 @@ class Pipeline:
                 "dependencies": [],
                 "requirements_file": REQUIREMENTS_FILE,
                 "acceptance_summary": ACCEPTANCE_SUMMARY,
+                "acceptance_ids": [],
                 "pending_feedback": pending_feedback,
                 "artifacts": {
                     "requirements": REQUIREMENTS_FILE,

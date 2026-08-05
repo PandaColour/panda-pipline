@@ -77,7 +77,7 @@ class BreakPipeline:
         )
 
     def _create_agent(self, name, prompt_file):
-        agent_type = "codex"
+        agent_type = "cursor"
         session_id = self._agent_session_id(name, agent_type)
         agent = Agent(
             name,
@@ -636,6 +636,12 @@ class BreakPipeline:
                     item["agent_sessions"] = previous_item.get("agent_sessions")
                 else:
                     item.pop("agent_sessions", None)
+                changed = True
+            if item.get("acceptance_ids") != previous_item.get("acceptance_ids"):
+                if "acceptance_ids" in previous_item:
+                    item["acceptance_ids"] = previous_item.get("acceptance_ids")
+                else:
+                    item.pop("acceptance_ids", None)
                 changed = True
         return changed
 

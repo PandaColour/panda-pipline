@@ -255,12 +255,18 @@ class ExecutionPlanStore:
             "requirements_file": str,
             "acceptance_summary": str,
         }
+        optional_list_fields = {"acceptance_ids"}
         for item in plan["items"]:
             if not isinstance(item, dict):
                 raise ValueError("执行计划条目格式无效。")
             for field, field_type in required_fields.items():
                 if field not in item or type(item[field]) is not field_type:
                     raise ValueError(f"执行计划条目字段无效: {field}")
+            for field in optional_list_fields:
+                if field in item and not isinstance(item[field], list):
+                    raise ValueError(f"执行计划条目字段类型无效（应为 list）: {field}")
+                if field in item and not all(isinstance(v, str) for v in item[field]):
+                    raise ValueError(f"执行计划条目字段元素类型无效（应为 str）: {field}")
             normalized_status = ExecutionPlanStore.normalize_status(item["status"], valid_statuses)
             if normalized_status != item["status"]:
                 item["status"] = normalized_status
