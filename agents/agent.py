@@ -5,15 +5,17 @@ from config import SYSTEM_PROMPT_DIR
 from .claude import ClaudeAgent
 from .codex import CodexAgent
 from .cursor import CursorAgent
+from .opencode import OpencodeAgent
 
 
 class Agent:
-    """Public conversational agent facade for Claude, Codex, and Cursor."""
+    """Public conversational agent facade for Claude, Codex, Cursor, and Opencode."""
 
     _STRATEGY_MAP = {
         "claude": ClaudeAgent,
         "codex": CodexAgent,
         "cursor": CursorAgent,
+        "opencode": OpencodeAgent,
     }
 
     def __init__(
