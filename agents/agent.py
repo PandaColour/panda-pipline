@@ -5,6 +5,7 @@ from config import SYSTEM_PROMPT_DIR
 from .claude import ClaudeAgent
 from .codex import CodexAgent
 from .cursor import CursorAgent
+from .dsh import DshAgent
 from .opencode import OpencodeAgent
 
 
@@ -15,6 +16,7 @@ class Agent:
         "claude": ClaudeAgent,
         "codex": CodexAgent,
         "cursor": CursorAgent,
+        "dsh": DshAgent,
         "opencode": OpencodeAgent,
     }
 
