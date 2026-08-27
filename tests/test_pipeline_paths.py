@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from config import SYSTEM_PROMPT_DIR
 from pipeline import Pipeline
 
 
@@ -76,17 +77,67 @@ class PipelinePathTests(unittest.TestCase):
     def test_create_agent_always_uses_pipeline_root(self):
         pipeline = Pipeline("relative-workspace")
 
-        with patch("pipeline.Agent") as agent_class:
+        with patch.object(pipeline, "_agent_status", return_value="开发中") as agent_status, \
+                patch("pipeline.Agent") as agent_class:
             created = pipeline._create_agent("需求分析", "requirements_analyst.md")
 
         self.assertIsNotNone(created)
-        agent_class.assert_called_once_with(
-            "需求分析",
-            "requirements_analyst.md",
-            pipeline.work_dir,
-            add_dirs=None,
-            agent_type="cursor",
-        )
+        call = agent_class.call_args
+        self.assertEqual(call.args, ("需求分析", "requirements_analyst.md", pipeline.work_dir))
+        self.assertEqual(call.kwargs["add_dirs"], None)
+        self.assertEqual(call.kwargs["agent_type"], "cursor")
+        self.assertEqual(call.kwargs["prompt_dir"], pipeline.prompt_dir)
+        self.assertEqual(call.kwargs["status_provider"](), "开发中")
+        agent_status.assert_called_once_with()
+
+    def test_memory_curation_template_lives_in_system_prompt(self):
+        template = Path(SYSTEM_PROMPT_DIR) / "memory_curation.md"
+
+        self.assertTrue(template.is_file())
+        content = template.read_text(encoding="utf-8")
+        for placeholder in (
+            "{opening}",
+            "{read_instruction}",
+            "{curation_scope}",
+            "{execution_plan_file}",
+            "{closing_instruction}",
+        ):
+            self.assertIn(placeholder, content)
+        self.assertIn("记忆整理目的", content)
+        self.assertIn("为后续类似项目从0到1提供指导", content)
+        self.assertIn("为后续需求提供代码索引", content)
+        self.assertIn("当前源码", content)
+        self.assertIn("长期 memory 不得写入 R-xxx", content)
+
+    def test_final_reflection_renders_system_prompt_template(self):
+        with tempfile.TemporaryDirectory() as work_dir, tempfile.TemporaryDirectory() as prompt_dir:
+            template = Path(prompt_dir) / "memory_curation.md"
+            template.write_text(
+                "CUSTOM SYSTEM TEMPLATE\n"
+                "{opening}\n"
+                "{read_instruction}\n"
+                "{curation_scope}\n"
+                "{execution_plan_file}\n"
+                "{closing_instruction}\n",
+                encoding="utf-8",
+            )
+            pipeline = Pipeline(work_dir)
+            pipeline.prompt_dir = prompt_dir
+            analyst = MagicMock()
+            developer = MagicMock()
+            pipeline.agents = {
+                "需求分析": analyst,
+                "代码开发": developer,
+            }
+
+            pipeline._run_final_reflection()
+
+            analyst_prompt = analyst.send_message.call_args.args[0]
+            developer_prompt = developer.send_message.call_args.args[0]
+            for prompt in (analyst_prompt, developer_prompt):
+                self.assertIn("CUSTOM SYSTEM TEMPLATE", prompt)
+                self.assertIn(pipeline.execution_plan_file, prompt)
+                self.assertIn("收到记忆整理指令", prompt)
 
     def test_run_passes_user_idea_into_requirements_stage(self):
         pipeline = Pipeline("relative-workspace")
@@ -111,6 +162,7 @@ class PipelinePathTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as work_dir:
             pipeline = Pipeline(work_dir)
             analyst = MagicMock()
+            analyst.display_name = "需求分析agent(cursor)"
             reviewer = MagicMock()
             reviewer.send_message.return_value = "同意方案"
             agents = {"需求分析": analyst, "需求审查": reviewer}
@@ -137,6 +189,7 @@ class PipelinePathTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as work_dir:
             pipeline = Pipeline(work_dir)
             analyst = MagicMock()
+            analyst.display_name = "需求分析agent(cursor)"
             reviewer = MagicMock()
             reviewer.send_message.side_effect = ["缺少范围", "仍缺少验收", "还不完整"]
             agents = {"需求分析": analyst, "需求审查": reviewer}
@@ -149,7 +202,12 @@ class PipelinePathTests(unittest.TestCase):
             self.assertEqual(analyst.send_message.call_count, 3)
             self.assertIn("缺少范围", analyst.send_message.call_args_list[1].args[0])
             self.assertIn("仍缺少验收", analyst.send_message.call_args_list[2].args[0])
-            gate.assert_called_once_with("1. 需求分析", pipeline.user_requirements_file, skip_human=False)
+            gate.assert_called_once_with(
+                "1. 需求分析",
+                pipeline.user_requirements_file,
+                skip_human=False,
+                feedback_target="需求分析agent(cursor)",
+            )
 
     def test_ensure_execution_plan_creates_single_requirement_under_requirements(self):
         with tempfile.TemporaryDirectory() as work_dir:

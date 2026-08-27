@@ -7,11 +7,12 @@ from dataclasses import dataclass
 
 from agents import Agent
 from execution_plan import ExecutionPlanStore
-from review_decision import review_passed, structured_review_decision
+from review_decision import review_passed, structured_final_answer_decision, structured_review_decision
 from workflow import human_gate
 
 
 BREAK_SYSTEM_PROMPT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "break-system-prompt")
+MEMORY_CURATION_PROMPT = "memory_curation.md"
 BREAKDOWN_APPROVAL = "拆分方案通过"
 ITEM_APPROVAL = "任务完成"
 REQUIREMENTS_APPROVAL = "同意方案"
@@ -59,8 +60,11 @@ class BreakPipeline:
         self._pending_human_feedback = {}
         self._pending_requirement_feedback = {}
 
-    def _human_gate(self, stage_name, review_file_path=None):
-        return human_gate(stage_name, review_file_path, skip_human=self.skip_human)
+    def _human_gate(self, stage_name, review_file_path=None, feedback_agent=None):
+        gate_options = {"skip_human": self.skip_human}
+        if feedback_agent is not None:
+            gate_options["feedback_target"] = feedback_agent.display_name
+        return human_gate(stage_name, review_file_path, **gate_options)
 
     def has_resumable_state(self):
         return any(
@@ -74,7 +78,7 @@ class BreakPipeline:
 
     def _create_agent(self, name, prompt_file):
         agent_type = "cursor"
-        session_id = self._agent_session_id(name)
+        session_id = self._agent_session_id(name, agent_type)
         agent = Agent(
             name,
             prompt_file,
@@ -89,15 +93,49 @@ class BreakPipeline:
                 agent_type,
                 new_session_id,
             ),
+            status_provider=lambda: self._agent_status(name),
         )
         self.agents[name] = agent
         return agent
 
-    def _agent_session_id(self, agent_name):
+    def _agent_status(self, agent_name):
+        try:
+            plan = self.execution_plan.read()
+        except (OSError, ValueError):
+            return None
+
+        requirement_id = self._agent_requirement_id(agent_name)
+        if requirement_id:
+            status = next(
+                (
+                    item.get("status")
+                    for item in plan.get("items", [])
+                    if isinstance(item, dict) and item.get("id") == requirement_id
+                ),
+                None,
+            )
+        else:
+            status = plan.get("demand", {}).get("status")
+
+        status = ExecutionPlanStore.normalize_status(status, VALID_STATUSES)
+        return status if status in VALID_STATUSES else None
+
+    def _render_break_prompt(self, prompt_file, **values):
+        template_path = os.path.join(self.prompt_dir, prompt_file)
+        with open(template_path, encoding="utf-8") as template_file:
+            template = template_file.read()
+        try:
+            return template.format(**values)
+        except KeyError as error:
+            missing_key = error.args[0]
+            raise ValueError(f"Prompt template {prompt_file} missing placeholder value: {missing_key}") from error
+
+    def _agent_session_id(self, agent_name, agent_type):
         try:
             return self.execution_plan.get_agent_session(
                 agent_name,
                 requirement_id=self._agent_requirement_id(agent_name),
+                agent_type=agent_type,
             )
         except ValueError:
             return None
@@ -153,6 +191,55 @@ class BreakPipeline:
                 self._archive_completed_requirements()
             print("\n🎉🎉🎉 【拆分流水线圆满完成】所有小需求均已通过！")
 
+    @staticmethod
+    def _breakdown_resource_blocker(response):
+        if not isinstance(response, str):
+            return None
+        decision = structured_final_answer_decision(response, {"blocked"})
+        if decision is None:
+            return None
+        blocker = decision.get("blocker")
+        if not isinstance(blocker, dict):
+            return None
+        if blocker.get("kind") not in {"file_unreadable", "material_permission_denied"}:
+            return None
+        if not all(
+            isinstance(blocker.get(field), str) and blocker[field].strip()
+            for field in ("resource", "reason", "required_user_action")
+        ):
+            return None
+        return {**blocker, "summary": decision.get("summary")}
+
+    def _resolve_breakdown_resource_blocker(self, breaker, response):
+        while blocker := self._breakdown_resource_blocker(response):
+            summary = blocker.get("summary") or blocker.get("reason") or "拆分所需资源不可访问"
+            print(
+                "⚠️ 拆分资源访问阻塞："
+                f"资源={blocker.get('resource') or '未提供'}；"
+                f"原因={blocker.get('reason') or '未提供'}；"
+                f"需要用户处理={blocker.get('required_user_action') or '未提供'}"
+            )
+            feedback = human_gate(
+                f"1. 大需求拆分资源访问阻塞：{summary}",
+                self.requirements_index_file,
+                skip_human=False,
+                feedback_target=breaker.display_name,
+            )
+            while feedback is None:
+                print("⚠️ 请提供资源处理结果后再继续拆分。")
+                feedback = human_gate(
+                    f"1. 大需求拆分资源访问阻塞：{summary}",
+                    self.requirements_index_file,
+                    skip_human=False,
+                    feedback_target=breaker.display_name,
+                )
+            response = breaker.send_message(
+                f"用户已处理资源访问阻塞：{feedback}\n"
+                "请重新读取所需文件或物料并更新拆分产物；若仍无法读取文件或因权限无法获取物料，"
+                "请继续按资源访问阻塞协议报告。"
+            )
+        return response
+
     def _run_breakdown(self, user_idea=None):
         print("\n" + "=" * 60 + "\n📋 阶段 1: 大需求拆分\n" + "=" * 60)
         has_existing_index = os.path.isfile(self.requirements_index_file)
@@ -172,7 +259,8 @@ class BreakPipeline:
         breaker = self._create_agent("需求拆分", "requirement_breaker.md")
         reviewer = self._create_agent("拆分评审", "requirement_break_reviewer.md")
         if initial_breakdown_message:
-            breaker.send_message(initial_breakdown_message)
+            response = breaker.send_message(initial_breakdown_message)
+            self._resolve_breakdown_resource_blocker(breaker, response)
         while True:
             self._set_demand_status("拆分评审中", source=user_idea)
             for attempt in range(1, MAX_REQUIREMENT_REVIEW_ATTEMPTS + 1):
@@ -185,15 +273,17 @@ class BreakPipeline:
                 if attempt >= MAX_REQUIREMENT_REVIEW_ATTEMPTS:
                     print("⚠️ 拆分评审连续 3 次未通过，按策略自动进入人工确认，让后续流程先完成可完成内容。")
                     break
-                breaker.send_message(f"拆分评审意见：{review}\n请更新 {self.requirements_dir}，仅修改拆分产物。")
-            feedback = self._human_gate("1. 大需求拆分", self.requirements_index_file)
+                response = breaker.send_message(f"拆分评审意见：{review}\n请更新 {self.requirements_dir}，仅修改拆分产物。")
+                self._resolve_breakdown_resource_blocker(breaker, response)
+            feedback = self._human_gate("1. 大需求拆分", self.requirements_index_file, breaker)
             if feedback is None:
                 os.makedirs(self.requirements_dir, exist_ok=True)
                 with open(self.breakdown_approval_file, "w", encoding="utf-8") as approval_file:
                     approval_file.write("approved\n")
                 self._set_demand_status("开发中", source=user_idea)
                 return
-            breaker.send_message(f"人工审核意见：{feedback}\n请更新 {self.requirements_dir}，然后等待重新评审。")
+            response = breaker.send_message(f"人工审核意见：{feedback}\n请更新 {self.requirements_dir}，然后等待重新评审。")
+            self._resolve_breakdown_resource_blocker(breaker, response)
 
     def _breakdown_instruction(self, user_idea):
         return (
@@ -230,12 +320,12 @@ class BreakPipeline:
                 self._validate_items(items)
                 continue
             if item.status == "待需求人工确认":
-                self._resume_requirements_human_gate(item)
+                self._resume_requirements_human_gate(item, item_agents["analyst"])
                 items = self._load_items()
                 self._validate_items(items)
                 continue
             if item.status == "待人工确认":
-                self._resume_human_gate(item)
+                self._resume_human_gate(item, item_agents["developer"])
                 items = self._load_items()
                 self._validate_items(items)
                 continue
@@ -292,7 +382,11 @@ class BreakPipeline:
                 self._clear_pending_feedback(item.requirement_id)
                 self._set_status(item.requirement_id, "需求评审中")
             self._set_status(item.requirement_id, "待需求人工确认")
-            feedback = self._human_gate(f"2. 小需求 {item.requirement_id} 需求分析", analysis_report)
+            feedback = self._human_gate(
+                f"2. 小需求 {item.requirement_id} 需求分析",
+                analysis_report,
+                analyst,
+            )
             if feedback is None:
                 self._set_status(item.requirement_id, "待开发")
                 return
@@ -302,8 +396,12 @@ class BreakPipeline:
             self._clear_pending_feedback(item.requirement_id)
             self._set_status(item.requirement_id, "需求评审中")
 
-    def _resume_requirements_human_gate(self, item):
-        feedback = self._human_gate(f"2. 小需求 {item.requirement_id} 需求分析", self._item_paths(item)["requirements_analysis"])
+    def _resume_requirements_human_gate(self, item, analyst):
+        feedback = self._human_gate(
+            f"2. 小需求 {item.requirement_id} 需求分析",
+            self._item_paths(item)["requirements_analysis"],
+            analyst,
+        )
         if feedback is None:
             self._set_status(item.requirement_id, "待开发")
             return
@@ -349,7 +447,7 @@ class BreakPipeline:
                 self._set_status(item.requirement_id, "代码评审中")
                 continue
             self._set_status(item.requirement_id, "待人工确认")
-            feedback = self._human_gate(f"2. 小需求 {item.requirement_id}", requirement_file)
+            feedback = self._human_gate(f"2. 小需求 {item.requirement_id}", requirement_file, developer)
             if feedback is None:
                 self._set_status(item.requirement_id, "记忆整理中")
                 return
@@ -363,9 +461,9 @@ class BreakPipeline:
             self._clear_pending_feedback(item.requirement_id)
             self._set_status(item.requirement_id, "代码评审中")
 
-    def _resume_human_gate(self, item):
+    def _resume_human_gate(self, item, developer):
         requirement_file = self._item_paths(item)["requirements"]
-        feedback = self._human_gate(f"2. 小需求 {item.requirement_id}", requirement_file)
+        feedback = self._human_gate(f"2. 小需求 {item.requirement_id}", requirement_file, developer)
         if feedback is None:
             self._set_status(item.requirement_id, "记忆整理中")
             return
@@ -385,18 +483,30 @@ class BreakPipeline:
         )
         memory_dir = os.path.join(self.work_dir, "memory") + os.sep
         curation_messages = {
-            "analyst": (
-                f"当前需求 {item.requirement_id} 已通过人工审核，收到记忆整理指令。"
-                f"请读取需要核验的正式产物：{report_paths}，只将需求侧事实沉淀到 {memory_dir}："
-                "业务规则、状态流转、场景流程、接口约束、UI/Figma 约束、验收规则和待确认边界。"
-                "需求评审和代码审查报告只作为证据输入；不得修改其他需求、执行计划或源码。"
+            "analyst": self._render_break_prompt(
+                MEMORY_CURATION_PROMPT,
+                opening="调用消息指定的小需求已通过人工审核，收到记忆整理指令。",
+                read_instruction=f"请读取需要核验的正式产物：{report_paths}。",
+                curation_scope=(
+                    f"只将需求侧事实沉淀到 {memory_dir}："
+                    "业务规则、状态流转、场景流程、接口约束、UI/Figma 约束、验收规则和待确认边界。"
+                ),
+                execution_plan_file=self.execution_plan_file,
+                closing_instruction="需求评审和代码审查报告只作为证据输入；不得修改其他需求、执行计划或源码。",
             ),
-            "developer": (
-                f"当前需求 {item.requirement_id} 已通过人工审核，收到记忆整理指令。"
-                f"请读取需要核验的正式产物：{report_paths}、当前代码及已更新的 memory/，"
-                f"只将实现侧事实沉淀到 {memory_dir}：真实代码路径、接口封装、认证方式、复用方式、模块边界、实现坑点和禁止做法。"
-                f"需求评审和代码审查报告只作为证据输入；不得修改其他需求、执行计划或源码。"
-                f"最后将本小需求的沉淀结果、证据来源、更新的 memory 文件、未沉淀原因和后续注意事项写入 {paths['memory_report']}。"
+            "developer": self._render_break_prompt(
+                MEMORY_CURATION_PROMPT,
+                opening="调用消息指定的小需求已通过人工审核，收到记忆整理指令。",
+                read_instruction=f"请读取需要核验的正式产物：{report_paths}、当前代码及已更新的 memory/。",
+                curation_scope=(
+                    f"只将实现侧事实沉淀到 {memory_dir}："
+                    "真实代码路径、接口封装、认证方式、复用方式、模块边界、实现坑点和禁止做法。"
+                ),
+                execution_plan_file=self.execution_plan_file,
+                closing_instruction=(
+                    "需求评审和代码审查报告只作为证据输入；不得修改其他需求、执行计划或源码。"
+                    f"最后将本小需求的沉淀结果、证据来源、更新的 memory 文件、未沉淀原因和后续注意事项写入 {paths['memory_report']}。"
+                ),
             ),
         }
         for role, message in curation_messages.items():
@@ -526,6 +636,12 @@ class BreakPipeline:
                     item["agent_sessions"] = previous_item.get("agent_sessions")
                 else:
                     item.pop("agent_sessions", None)
+                changed = True
+            if item.get("acceptance_ids") != previous_item.get("acceptance_ids"):
+                if "acceptance_ids" in previous_item:
+                    item["acceptance_ids"] = previous_item.get("acceptance_ids")
+                else:
+                    item.pop("acceptance_ids", None)
                 changed = True
         return changed
 
@@ -711,7 +827,15 @@ class BreakPipeline:
         items = self._load_items()
         memory_reports = [self._item_paths(item)["memory_report"] for item in items]
         breaker.send_message(
-            f"所有小需求已完成。请只进行拆分层面的最终记忆整理：读取 {self.requirements_index_file} 和各项记忆报告 "
-            f"{memory_reports}，结合项目 memory/，只沉淀跨需求可复用的拆分、依赖和整体架构结论。"
-            "不要重复各项已沉淀的实现细节，不得修改需求、报告、执行计划或源码。"
+            self._render_break_prompt(
+                MEMORY_CURATION_PROMPT,
+                opening="所有小需求已完成。请只进行拆分层面的最终记忆整理。",
+                read_instruction=(
+                    f"请读取 {self.requirements_index_file}、{self.execution_plan_file}、"
+                    f"各项记忆报告 {memory_reports}、当前源码和项目 memory/。"
+                ),
+                curation_scope="只沉淀跨需求可复用的拆分、依赖和整体架构结论。",
+                execution_plan_file=self.execution_plan_file,
+                closing_instruction="不要重复各项已沉淀的实现细节，不得修改需求、报告、执行计划或源码。",
+            )
         )

@@ -36,6 +36,32 @@ def structured_review_decision(response):
     return None
 
 
+def structured_final_answer_decision(response, allowed_statuses):
+    """Extract a FINAL_ANSWER JSON object with a status allowed by one caller."""
+    if not isinstance(response, str):
+        return None
+    marker_index = response.rfind(FINAL_ANSWER_MARKER)
+    if marker_index < 0:
+        return None
+    tail = response[marker_index + len(FINAL_ANSWER_MARKER):].lstrip()
+    if tail.startswith(":"):
+        tail = tail[1:].lstrip()
+    candidates = [tail]
+    if tail.startswith("```"):
+        fence_match = re.match(r"```(?:json)?\s*(.*?)\s*```", tail, re.DOTALL | re.IGNORECASE)
+        if fence_match:
+            candidates.insert(0, fence_match.group(1))
+    for candidate in candidates:
+        parsed = _parse_json_object(candidate)
+        if (
+            isinstance(parsed, dict)
+            and parsed.get("status") in allowed_statuses
+            and "approval_token" in parsed
+        ):
+            return parsed
+    return None
+
+
 def _candidate_json_texts(response):
     marker_index = response.rfind(FINAL_ANSWER_MARKER)
     if marker_index >= 0:

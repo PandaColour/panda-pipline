@@ -142,6 +142,13 @@ class BackendMaterialPromptContractTests(unittest.TestCase):
         self.assertIn("planned/unverified", reviewer)
         self.assertIn("不得通过", reviewer)
 
+    def test_breakdown_resource_blocker_requires_original_url_in_human_gate_summary(self):
+        writer = (ROOT / "break-system-prompt" / "requirement_breaker.md").read_text(encoding="utf-8")
+
+        self.assertIn("原始完整 URL", writer)
+        self.assertIn("`summary` 必须包含同一个原始完整 URL", writer)
+        self.assertIn("不得只填写文档名称", writer)
+
     def test_item_prompts_require_reading_batch_shared_context(self):
         for prompt_file in SHARED_CONTEXT_CONSUMER_PROMPTS:
             content = prompt_file.read_text(encoding="utf-8")
@@ -155,6 +162,80 @@ class BackendMaterialPromptContractTests(unittest.TestCase):
             self.assertIn("物料可用性验证", content, prompt_file.name)
             self.assertIn("接口连通性验证", content, prompt_file.name)
             self.assertIn("无法验证", content, prompt_file.name)
+
+    def test_breakdown_prompts_do_not_block_whole_requirement_for_unavailable_external_service(self):
+        breaker = (ROOT / "break-system-prompt" / "requirement_breaker.md").read_text(encoding="utf-8")
+        self.assertIn("外部服务不可用不得阻塞整个需求", breaker)
+        self.assertIn("Mock/Stub/Fake", breaker)
+        self.assertIn("独立延期/门禁需求", breaker)
+        self.assertIn("不得猜测协议或安全策略", breaker)
+
+    def test_item_requirement_prompts_allow_mock_when_development_environment_is_blocked(self):
+        prompt_files = [
+            ROOT / "break-system-prompt" / "item_requirements_analyst.md",
+            ROOT / "break-system-prompt" / "item_requirements_reviewer.md",
+        ]
+        for prompt_file in prompt_files:
+            content = prompt_file.read_text(encoding="utf-8")
+            self.assertIn("开发环境阻塞不得作为整项需求门禁", content, prompt_file.name)
+            self.assertIn("后端服务异常", content, prompt_file.name)
+            self.assertIn("VPN", content, prompt_file.name)
+            self.assertIn("Mock/Stub/Fake", content, prompt_file.name)
+            self.assertIn("真实联调未验证", content, prompt_file.name)
+
+        reviewer = prompt_files[1].read_text(encoding="utf-8")
+        self.assertIn("不得仅因缺少真实端到端验证而不通过", reviewer)
+        self.assertIn("应输出 `approved`", reviewer)
+        self.assertNotIn("status=requirement_change", reviewer)
+
+    def test_item_requirement_prompts_allow_documented_conservative_product_decisions(self):
+        prompt_files = [
+            ROOT / "break-system-prompt" / "item_requirements_analyst.md",
+            ROOT / "break-system-prompt" / "item_requirements_reviewer.md",
+        ]
+        for prompt_file in prompt_files:
+            content = prompt_file.read_text(encoding="utf-8")
+            self.assertIn("Agent 保守决策", content, prompt_file.name)
+            self.assertIn("明确的“暂不开发”优先于“开发完整版”", content, prompt_file.name)
+            self.assertIn("保持既有线上行为", content, prompt_file.name)
+            self.assertIn("新入口默认隐藏", content, prompt_file.name)
+            self.assertIn("资金、安全、隐私或不可逆操作必须 fail-closed", content, prompt_file.name)
+            self.assertIn("Feature Flag", content, prompt_file.name)
+            self.assertIn("恢复条件", content, prompt_file.name)
+
+        reviewer = prompt_files[1].read_text(encoding="utf-8")
+        self.assertIn("不得仅因缺少产品负责人逐项签署而不通过", reviewer)
+        self.assertIn("应输出 `approved`", reviewer)
+
+    def test_item_delivery_prompts_implement_and_approve_conservative_product_decisions(self):
+        developer_file = ROOT / "break-system-prompt" / "item_developer.md"
+        reviewer_file = ROOT / "break-system-prompt" / "item_code_reviewer.md"
+        developer = developer_file.read_text(encoding="utf-8")
+        reviewer = reviewer_file.read_text(encoding="utf-8")
+
+        for prompt_file, content in ((developer_file, developer), (reviewer_file, reviewer)):
+            self.assertIn("Agent 保守决策", content, prompt_file.name)
+            self.assertIn("默认排除", content, prompt_file.name)
+            self.assertIn("新入口默认隐藏", content, prompt_file.name)
+            self.assertIn("Feature Flag", content, prompt_file.name)
+            self.assertIn("零真实副作用", content, prompt_file.name)
+            self.assertIn("保持既有行为", content, prompt_file.name)
+
+        self.assertIn("Agent 保守决策是当前可执行范围", developer)
+        self.assertIn(
+            "不得修改 `user_requirements.md`、`requirements_analysis.md`、`requirement_review.md`、"
+            "`requirements/shared_context.md`、`requirements/index.md` 或 `requirements/execution_plan.json`",
+            developer,
+        )
+        self.assertIn("没有新增业务实现也可以是正确交付", developer)
+        self.assertIn("Agent 保守决策执行表", developer)
+
+        self.assertIn("默认排除也是有效实现", reviewer)
+        self.assertIn("不得仅因缺少产品负责人逐项签署而不通过", reviewer)
+        self.assertIn("不得要求 Developer 修改需求文档", reviewer)
+        self.assertIn("不应返回 `requirement_change`", reviewer)
+        self.assertIn("默认排除且不交付 UI 时，不要求 Figma 视觉对比或真实业务 E2E", reviewer)
+        self.assertIn("应输出 `approved`", reviewer)
 
     def test_ui_requirement_analysis_prompts_require_figma_reference_screens_and_visual_baseline(self):
         prompt_files = [
@@ -219,6 +300,16 @@ class BackendMaterialPromptContractTests(unittest.TestCase):
             self.assertNotIn("不编写或修改测试代码", content, prompt_file.name)
             self.assertNotIn("不编写测试代码", content, prompt_file.name)
 
+    def test_developer_prompts_require_minimum_smoke_tests_and_layered_fallback(self):
+        for prompt_file in DEVELOPER_PROMPTS:
+            content = prompt_file.read_text(encoding="utf-8")
+            self.assertIn("最小冒烟测试", content, prompt_file.name)
+            self.assertIn("不得仅以源码对齐、编译通过或脚本验证替代运行验证", content, prompt_file.name)
+            self.assertIn("构建、安装、启动", content, prompt_file.name)
+            self.assertIn("mock/stub", content, prompt_file.name)
+            self.assertIn("不得将 mock 冒烟结果描述为真实端到端验收", content, prompt_file.name)
+            self.assertIn("IDE Run `app`", content, prompt_file.name)
+
     def test_review_prompts_allow_disclosed_mocks_but_require_backend_todo(self):
         for prompt_file in REVIEW_PROMPTS:
             content = prompt_file.read_text(encoding="utf-8")
@@ -235,6 +326,27 @@ class BackendMaterialPromptContractTests(unittest.TestCase):
             self.assertIn("mock 网络请求", content, prompt_file.name)
             self.assertIn("开发测试验证", content, prompt_file.name)
             self.assertIn("不得通过", content, prompt_file.name)
+
+    def test_item_code_reviewer_routes_external_blockers_without_developer_rework_loop(self):
+        prompt_file = ROOT / "break-system-prompt" / "item_code_reviewer.md"
+        content = prompt_file.read_text(encoding="utf-8")
+
+        self.assertIn("外部服务不可用不得阻塞代码审查通过", content)
+        self.assertIn("不得把取得外部签收、恢复服务或提供业务审批令牌作为 developer 的修改项", content)
+        self.assertIn("无法由代码、测试或报告修改解决", content)
+        self.assertIn("status=requirement_change", content)
+        self.assertIn("不得重复返回 changes_requested", content)
+        self.assertIn("不得猜测协议或安全策略", content)
+
+    def test_code_review_prompts_block_missing_minimum_smoke_tests(self):
+        for prompt_file in CODE_REVIEW_PROMPTS:
+            content = prompt_file.read_text(encoding="utf-8")
+            self.assertIn("最小冒烟测试审查", content, prompt_file.name)
+            self.assertIn("仅有源码分析、编译通过、脚本验证", content, prompt_file.name)
+            self.assertIn("账号、权限、网络或后端不可用不是跳过冒烟测试的理由", content, prompt_file.name)
+            self.assertIn("分层冒烟测试", content, prompt_file.name)
+            self.assertIn("不得通过", content, prompt_file.name)
+            self.assertIn("IDE Run `app`", content, prompt_file.name)
 
     def test_review_prompts_allow_evidence_based_inference_without_fabrication(self):
         for prompt_file in REVIEW_PROMPTS:

@@ -1,10 +1,12 @@
 import os
 from agents import Agent
+from config import SYSTEM_PROMPT_DIR
 from execution_plan import ExecutionPlanStore
-from review_decision import review_passed
+from review_decision import review_passed, structured_final_answer_decision
 from workflow import human_gate
 
 MAX_REQUIREMENT_REVIEW_ATTEMPTS = 3
+MEMORY_CURATION_PROMPT = "memory_curation.md"
 VALID_STATUSES = {
     "需求分析中",
     "需求评审中",
@@ -40,10 +42,65 @@ class Pipeline:
         self.code_review_file = os.path.join(self.requirement_dir, "code_review.md")
         self.bug_report_file = os.path.join(self.requirement_dir, "bug_report.md")
         self.memory_report_file = os.path.join(self.requirement_dir, "memory_report.md")
+        self.prompt_dir = SYSTEM_PROMPT_DIR
         self.agents = {}
 
-    def _human_gate(self, stage_name, review_file_path=None):
-        return human_gate(stage_name, review_file_path, skip_human=self.skip_human)
+    def _human_gate(self, stage_name, review_file_path=None, feedback_agent=None):
+        gate_options = {"skip_human": self.skip_human}
+        if feedback_agent is not None:
+            gate_options["feedback_target"] = feedback_agent.display_name
+        return human_gate(stage_name, review_file_path, **gate_options)
+
+    @staticmethod
+    def _resource_blocker(response):
+        """Detect a resource-access blocked response from the analyst."""
+        if not isinstance(response, str):
+            return None
+        decision = structured_final_answer_decision(response, {"blocked"})
+        if decision is None:
+            return None
+        blocker = decision.get("blocker")
+        if not isinstance(blocker, dict):
+            return None
+        if blocker.get("kind") not in {"file_unreadable", "material_permission_denied"}:
+            return None
+        if not all(
+            isinstance(blocker.get(field), str) and blocker[field].strip()
+            for field in ("resource", "reason", "required_user_action")
+        ):
+            return None
+        return {**blocker, "summary": decision.get("summary")}
+
+    def _resolve_resource_blocker(self, analyst, response):
+        """Force human intervention for resource access issues (不受 --skipHuman 影响)."""
+        while blocker := self._resource_blocker(response):
+            summary = blocker.get("summary") or blocker.get("reason") or "需求分析所需资源不可访问"
+            print(
+                "⚠️ 资源访问阻塞："
+                f"资源={blocker.get('resource') or '未提供'}；"
+                f"原因={blocker.get('reason') or '未提供'}；"
+                f"需要用户处理={blocker.get('required_user_action') or '未提供'}"
+            )
+            feedback = human_gate(
+                f"1. 需求分析资源访问阻塞：{summary}",
+                self.user_requirements_file,
+                skip_human=False,
+                feedback_target=analyst.display_name,
+            )
+            while feedback is None:
+                print("⚠️ 请提供资源处理结果后再继续。")
+                feedback = human_gate(
+                    f"1. 需求分析资源访问阻塞：{summary}",
+                    self.user_requirements_file,
+                    skip_human=False,
+                    feedback_target=analyst.display_name,
+                )
+            response = analyst.send_message(
+                f"用户已处理资源访问阻塞：{feedback}\n"
+                "请重新读取所需文件或物料并更新需求文档；若仍无法读取文件或因权限无法获取物料，"
+                "请继续按资源访问阻塞协议报告。"
+            )
+        return response
 
     def has_resumable_state(self):
         plan = self._valid_existing_plan()
@@ -58,9 +115,28 @@ class Pipeline:
             self.work_dir,
             add_dirs=None,
             agent_type="cursor",
+            prompt_dir=self.prompt_dir,
+            status_provider=self._agent_status,
         )
         self.agents[name] = agent
         return agent
+
+    def _agent_status(self):
+        try:
+            status = self._item_status()
+        except (OSError, ValueError):
+            return None
+        return status if status in VALID_STATUSES else None
+
+    def _render_system_prompt(self, prompt_file, **values):
+        template_path = os.path.join(self.prompt_dir, prompt_file)
+        with open(template_path, encoding="utf-8") as template_file:
+            template = template_file.read()
+        try:
+            return template.format(**values)
+        except KeyError as error:
+            missing_key = error.args[0]
+            raise ValueError(f"Prompt template {prompt_file} missing placeholder value: {missing_key}") from error
 
     def run(self, user_idea=None):
         if self._active_requirements_complete():
@@ -142,6 +218,7 @@ class Pipeline:
                 "dependencies": [],
                 "requirements_file": REQUIREMENTS_FILE,
                 "acceptance_summary": ACCEPTANCE_SUMMARY,
+                "acceptance_ids": [],
                 "pending_feedback": pending_feedback,
                 "artifacts": {
                     "requirements": REQUIREMENTS_FILE,
@@ -179,7 +256,7 @@ class Pipeline:
 
         status = self._item_status()
         if status == "待需求人工确认":
-            human_feedback = self._human_gate("1. 需求分析", self.user_requirements_file)
+            human_feedback = self._human_gate("1. 需求分析", self.user_requirements_file, analyst)
             if human_feedback is None:
                 self._set_status("待开发")
                 return
@@ -197,7 +274,8 @@ class Pipeline:
             feedback = self._pending_feedback_message()
             if feedback:
                 analysis_prompt += f"待处理反馈：{feedback}"
-            analyst.send_message(analysis_prompt)
+            analyst_response = analyst.send_message(analysis_prompt)
+            analyst_response = self._resolve_resource_blocker(analyst, analyst_response)
             self._clear_pending_feedback()
             self._set_status("需求评审中")
 
@@ -231,7 +309,7 @@ class Pipeline:
                 )
 
             self._set_status("待需求人工确认")
-            human_feedback = self._human_gate("1. 需求分析", self.user_requirements_file)
+            human_feedback = self._human_gate("1. 需求分析", self.user_requirements_file, analyst)
             if human_feedback is None:
                 self._set_demand_status("开发中")
                 self._set_status("待开发")
@@ -260,7 +338,7 @@ class Pipeline:
         while True:
             status = self._item_status()
             if status == "待人工确认":
-                human_feedback = self._human_gate("2. 代码开发", self.requirement_dir)
+                human_feedback = self._human_gate("2. 代码开发", self.requirement_dir, developer)
                 if human_feedback is None:
                     self._set_status("记忆整理中")
                     break
@@ -299,7 +377,7 @@ class Pipeline:
 
             if review_passed(review_response, "任务完成"):
                 self._set_status("待人工确认")
-                human_feedback = self._human_gate("2. 代码开发", self.requirement_dir)
+                human_feedback = self._human_gate("2. 代码开发", self.requirement_dir, developer)
                 if human_feedback is None:
                     self._set_status("记忆整理中")
                     break
@@ -400,25 +478,39 @@ class Pipeline:
             f"{self.test_report_file}、{self.code_review_file}"
         )
         curation_messages = {
-            "需求分析": (
-                f"收到记忆整理指令。请读取已验证产物：{report_paths}，只将需求侧事实沉淀到 {memory_dir}："
-                "业务规则、状态流转、场景流程、接口约束、UI/Figma 约束、验收规则和待确认边界。"
-                "审查报告只作为证据输入；不得写入猜测、临时任务细节或未验证风险。"
+            "需求分析": self._render_system_prompt(
+                MEMORY_CURATION_PROMPT,
+                opening="收到记忆整理指令。",
+                read_instruction=f"请读取已验证产物：{report_paths}。",
+                curation_scope=(
+                    f"只将需求侧事实沉淀到 {memory_dir}："
+                    "业务规则、状态流转、场景流程、接口约束、UI/Figma 约束、验收规则和待确认边界。"
+                ),
+                execution_plan_file=self.execution_plan_file,
+                closing_instruction="审查报告只作为证据输入；不得修改需求、报告、执行计划或源码。",
             ),
-            "代码开发": (
-                f"收到记忆整理指令。请读取已验证产物：{report_paths} 以及当前代码，只将实现侧事实沉淀到 {memory_dir}："
-                "真实代码路径、接口封装、认证方式、复用方式、模块边界、实现坑点和禁止做法。"
-                f"审查报告只作为证据输入；不得写入猜测、临时任务细节或未验证风险。"
-                f"最后将沉淀结果、证据来源、更新的 memory 文件和后续注意事项写入 {self.memory_report_file}。"
+            "代码开发": self._render_system_prompt(
+                MEMORY_CURATION_PROMPT,
+                opening="收到记忆整理指令。",
+                read_instruction=f"请读取已验证产物：{report_paths} 以及当前代码。",
+                curation_scope=(
+                    f"只将实现侧事实沉淀到 {memory_dir}："
+                    "真实代码路径、接口封装、认证方式、复用方式、模块边界、实现坑点和禁止做法。"
+                ),
+                execution_plan_file=self.execution_plan_file,
+                closing_instruction=(
+                    "审查报告只作为证据输入；不得修改需求、报告、执行计划或源码。"
+                    f"最后将沉淀结果、证据来源、更新的 memory 文件和后续注意事项写入 {self.memory_report_file}。"
+                ),
             ),
         }
 
         for name, message in curation_messages.items():
             agent = self.agents.get(name)
             if agent is None:
-                print(f"⚠️  未找到 Agent [{name}]，跳过。")
+                print(f"⚠️  未找到角色为 {name} 的 Agent，跳过。")
                 continue
-            print(f"\n📤 向 Agent [{name}] 发送记忆总结指令...")
+            print(f"\n📤 向 {agent.display_name} 发送记忆总结指令...")
             agent.send_message(message)
 
         print("\n✅ 记忆总结完成。")

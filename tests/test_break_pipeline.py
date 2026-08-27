@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 
 from agents import Agent
 from agents._result import AgentRunResult
+from break_pipeline import BREAK_SYSTEM_PROMPT_DIR
 from break_pipeline import BreakPipeline
 from break_pipeline import RequirementItem
 
@@ -25,6 +26,21 @@ class BreakPipelineTests(unittest.TestCase):
             pipeline._human_gate("测试", "workspace/requirements/index.md")
 
         gate.assert_called_once_with("测试", "workspace/requirements/index.md", skip_human=True)
+
+    def test_break_human_gate_uses_feedback_agent_display_name(self):
+        pipeline = BreakPipeline("workspace")
+        feedback_agent = MagicMock()
+        feedback_agent.display_name = "需求拆分agent(codex)"
+
+        with patch("break_pipeline.human_gate", return_value=None) as gate:
+            pipeline._human_gate("测试", "workspace/requirements/index.md", feedback_agent)
+
+        gate.assert_called_once_with(
+            "测试",
+            "workspace/requirements/index.md",
+            skip_human=False,
+            feedback_target="需求拆分agent(codex)",
+        )
 
     def test_item_artifacts_stay_in_its_own_workspace(self):
         pipeline = BreakPipeline("workspace")
@@ -97,6 +113,54 @@ class BreakPipelineTests(unittest.TestCase):
         self.assertNotIn("R-001", pipeline._active_item_agents)
         self.assertNotIn(agent.name, pipeline.agents)
 
+    def test_memory_curation_template_lives_in_break_system_prompt(self):
+        template = Path(BREAK_SYSTEM_PROMPT_DIR) / "memory_curation.md"
+
+        self.assertTrue(template.is_file())
+        content = template.read_text(encoding="utf-8")
+        for placeholder in (
+            "{opening}",
+            "{read_instruction}",
+            "{curation_scope}",
+            "{execution_plan_file}",
+            "{closing_instruction}",
+        ):
+            self.assertIn(placeholder, content)
+        self.assertIn("记忆整理目的", content)
+        self.assertIn("为后续类似项目从0到1提供指导", content)
+        self.assertIn("为后续需求提供代码索引", content)
+
+    def test_item_memory_prompt_renders_break_system_prompt_template(self):
+        with tempfile.TemporaryDirectory() as work_dir, tempfile.TemporaryDirectory() as prompt_dir:
+            template = Path(prompt_dir) / "memory_curation.md"
+            template.write_text(
+                "CUSTOM TEMPLATE\n"
+                "{opening}\n"
+                "{read_instruction}\n"
+                "{curation_scope}\n"
+                "{execution_plan_file}\n"
+                "{closing_instruction}\n",
+                encoding="utf-8",
+            )
+            pipeline = BreakPipeline(work_dir)
+            pipeline.prompt_dir = prompt_dir
+            self._write_requirement_files(work_dir, "R-001")
+            self._write_index(work_dir, [(1, "R-001", "记忆整理中", "无", "001-first.md")])
+            item = RequirementItem(
+                1, "R-001", "name", "记忆整理中", [],
+                "R-001-first/user_requirements.md", "ok",
+            )
+            agents = self._item_agent_set()
+
+            pipeline._run_item_memory(item, agents)
+
+            analyst_prompt = agents["analyst"].send_message.call_args.args[0]
+            developer_prompt = agents["developer"].send_message.call_args.args[0]
+            for prompt in (analyst_prompt, developer_prompt):
+                self.assertIn("CUSTOM TEMPLATE", prompt)
+                self.assertIn(pipeline.execution_plan_file, prompt)
+                self.assertIn("调用消息指定的小需求已通过人工审核", prompt)
+
     def test_code_approval_runs_memory_curation_before_completion(self):
         with tempfile.TemporaryDirectory() as work_dir:
             pipeline = BreakPipeline(work_dir)
@@ -117,6 +181,38 @@ class BreakPipelineTests(unittest.TestCase):
             self.assertIn("memory_report.md", agents["developer"].send_message.call_args.args[0])
             plan = json.loads(Path(pipeline.execution_plan_file).read_text(encoding="utf-8"))
             self.assertEqual(plan["items"][0]["status"], "已完成")
+
+    def test_item_memory_prompt_bans_requirement_ids_from_long_term_memory(self):
+        with tempfile.TemporaryDirectory() as work_dir:
+            pipeline = BreakPipeline(work_dir)
+            self._write_requirement_files(work_dir, "R-001")
+            self._write_index(work_dir, [(1, "R-001", "记忆整理中", "无", "001-first.md")])
+            item = RequirementItem(
+                1, "R-001", "name", "记忆整理中", [],
+                "R-001-first/user_requirements.md", "ok",
+            )
+            agents = self._item_agent_set()
+
+            pipeline._run_item_memory(item, agents)
+
+            analyst_prompt = agents["analyst"].send_message.call_args.args[0]
+            developer_prompt = agents["developer"].send_message.call_args.args[0]
+            for prompt in (analyst_prompt, developer_prompt):
+                self.assertIn("记忆整理目的", prompt)
+                self.assertIn("为后续类似项目从0到1提供指导", prompt)
+                self.assertIn("为后续需求提供代码索引", prompt)
+                self.assertIn("架构边界", prompt)
+                self.assertIn("关键类/函数", prompt)
+                self.assertIn("当前源码", prompt)
+                self.assertIn("execution_plan.json", prompt)
+                self.assertIn("当前已实现事实", prompt)
+                self.assertIn("长期 memory 不得写入 R-xxx", prompt)
+                self.assertIn("不得写入小需求名称", prompt)
+                self.assertIn("来源追溯只保留在 memory_report.md 和 execution_plan.json", prompt)
+                self.assertIn("不进入 memory/ 文件", prompt)
+                self.assertNotIn("只能作为来源证据", prompt)
+                self.assertIn("历史 memory", prompt)
+                self.assertIn("未沉淀原因", prompt)
 
     def test_restart_at_memory_status_only_runs_curator(self):
         with tempfile.TemporaryDirectory() as work_dir:
@@ -147,6 +243,33 @@ class BreakPipelineTests(unittest.TestCase):
             create_agent.assert_not_called()
             breakdown_agent.send_message.assert_called_once()
 
+    def test_final_memory_prompt_bans_requirement_ids_from_long_term_memory(self):
+        with tempfile.TemporaryDirectory() as work_dir:
+            pipeline = BreakPipeline(work_dir)
+            self._write_requirement_files(work_dir, "R-001")
+            self._write_index(work_dir, [(1, "R-001", "已完成", "无", "001-first.md")])
+            breakdown_agent = MagicMock()
+            pipeline.agents["需求拆分"] = breakdown_agent
+
+            pipeline._run_final_reflection()
+
+            prompt = breakdown_agent.send_message.call_args.args[0]
+            self.assertIn("记忆整理目的", prompt)
+            self.assertIn("为后续类似项目从0到1提供指导", prompt)
+            self.assertIn("为后续需求提供代码索引", prompt)
+            self.assertIn("架构边界", prompt)
+            self.assertIn("关键类/函数", prompt)
+            self.assertIn("当前源码", prompt)
+            self.assertIn("execution_plan.json", prompt)
+            self.assertIn("当前已实现事实", prompt)
+            self.assertIn("长期 memory 不得写入 R-xxx", prompt)
+            self.assertIn("不得写入小需求名称", prompt)
+            self.assertIn("来源追溯只保留在 memory_report.md 和 execution_plan.json", prompt)
+            self.assertIn("不进入 memory/ 文件", prompt)
+            self.assertNotIn("只能作为来源证据", prompt)
+            self.assertIn("历史 memory", prompt)
+            self.assertIn("按模块、接口、业务规则和架构能力组织", prompt)
+
     @staticmethod
     def _item_agent_set():
         return {
@@ -172,8 +295,11 @@ class BreakPipelineTests(unittest.TestCase):
     def test_create_agent_uses_break_prompt_directory(self):
         pipeline = BreakPipeline("workspace")
 
-        with patch("break_pipeline.Agent") as agent_class:
+        with patch.object(pipeline, "_agent_status", return_value="代码评审中") as agent_status, \
+                patch("break_pipeline.Agent") as agent_class:
             pipeline._create_agent("需求拆分", "requirement_breaker.md")
+            self.assertEqual(agent_class.call_args.kwargs["status_provider"](), "代码评审中")
+            agent_status.assert_called_once_with("需求拆分")
 
         self.assertEqual(
             agent_class.call_args.kwargs["prompt_dir"],
@@ -202,13 +328,13 @@ class BreakPipelineTests(unittest.TestCase):
             pipeline = BreakPipeline(work_dir)
             self._write_requirement_files(work_dir, "R-001")
             self._write_index(work_dir, [(1, "R-001", "待实施", "无", "001-first.md")])
-            previous_cursor = Agent._STRATEGY_MAP["cursor"]
-            Agent._STRATEGY_MAP["cursor"] = SessionReturningAgent
+            previous_codex = Agent._STRATEGY_MAP["codex"]
+            Agent._STRATEGY_MAP["codex"] = SessionReturningAgent
             try:
                 agent = pipeline._create_agent("R-001 小需求开发", "item_developer.md")
                 agent.send_message("开发")
             finally:
-                Agent._STRATEGY_MAP["cursor"] = previous_cursor
+                Agent._STRATEGY_MAP["codex"] = previous_codex
 
             plan = json.loads(Path(pipeline.execution_plan_file).read_text(encoding="utf-8"))
             self.assertEqual(
@@ -216,7 +342,7 @@ class BreakPipelineTests(unittest.TestCase):
                 "restored-session",
             )
 
-    def test_item_agent_session_is_restored_after_restart(self):
+    def test_item_agent_session_backend_mismatch_starts_fresh(self):
         with tempfile.TemporaryDirectory() as work_dir:
             pipeline = BreakPipeline(work_dir)
             self._write_requirement_files(work_dir, "R-001")
@@ -231,10 +357,76 @@ class BreakPipelineTests(unittest.TestCase):
             }
             Path(pipeline.execution_plan_file).write_text(json.dumps(plan, ensure_ascii=False), encoding="utf-8")
 
+            previous_codex = Agent._STRATEGY_MAP["codex"]
+            Agent._STRATEGY_MAP["codex"] = SessionReturningAgent
+            try:
+                restarted = BreakPipeline(work_dir)
+                agent = restarted._create_agent("R-001 小需求开发", "item_developer.md")
+                self.assertIsNone(agent.session_id)
+                agent.send_message("开发")
+            finally:
+                Agent._STRATEGY_MAP["codex"] = previous_codex
+
+            self.assertEqual(agent.session_id, "restored-session")
+            plan = json.loads(Path(restarted.execution_plan_file).read_text(encoding="utf-8"))
+            session = plan["items"][0]["agent_sessions"]["R-001 小需求开发"]
+            self.assertEqual(session["session_id"], "restored-session")
+            self.assertEqual(session["agent_type"], "codex")
+
+    def test_item_agent_session_matching_backend_is_restored(self):
+        with tempfile.TemporaryDirectory() as work_dir:
+            pipeline = BreakPipeline(work_dir)
+            self._write_requirement_files(work_dir, "R-001")
+            self._write_index(work_dir, [(1, "R-001", "待实施", "无", "001-first.md")])
+            plan = json.loads(Path(pipeline.execution_plan_file).read_text(encoding="utf-8"))
+            plan["items"][0]["agent_sessions"] = {
+                "R-001 小需求开发": {
+                    "session_id": "saved-session",
+                    "agent_type": "codex",
+                    "prompt_file": "item_developer.md",
+                }
+            }
+            Path(pipeline.execution_plan_file).write_text(json.dumps(plan, ensure_ascii=False), encoding="utf-8")
+
             restarted = BreakPipeline(work_dir)
             agent = restarted._create_agent("R-001 小需求开发", "item_developer.md")
 
             self.assertEqual(agent.session_id, "saved-session")
+
+    def test_item_agent_legacy_session_without_backend_is_restored(self):
+        with tempfile.TemporaryDirectory() as work_dir:
+            pipeline = BreakPipeline(work_dir)
+            self._write_requirement_files(work_dir, "R-001")
+            self._write_index(work_dir, [(1, "R-001", "待实施", "无", "001-first.md")])
+            plan = json.loads(Path(pipeline.execution_plan_file).read_text(encoding="utf-8"))
+            plan["items"][0]["agent_sessions"] = {
+                "R-001 小需求开发": {
+                    "session_id": "legacy-session",
+                    "prompt_file": "item_developer.md",
+                }
+            }
+            Path(pipeline.execution_plan_file).write_text(json.dumps(plan, ensure_ascii=False), encoding="utf-8")
+
+            restarted = BreakPipeline(work_dir)
+            agent = restarted._create_agent("R-001 小需求开发", "item_developer.md")
+
+            self.assertEqual(agent.session_id, "legacy-session")
+
+    def test_item_agent_legacy_string_session_is_restored(self):
+        with tempfile.TemporaryDirectory() as work_dir:
+            pipeline = BreakPipeline(work_dir)
+            self._write_requirement_files(work_dir, "R-001")
+            self._write_index(work_dir, [(1, "R-001", "待实施", "无", "001-first.md")])
+            plan = json.loads(Path(pipeline.execution_plan_file).read_text(encoding="utf-8"))
+            plan["items"][0]["agent_sessions"] = {
+                "R-001 小需求开发": "legacy-string-session",
+            }
+            Path(pipeline.execution_plan_file).write_text(json.dumps(plan, ensure_ascii=False), encoding="utf-8")
+
+            restarted = BreakPipeline(work_dir)
+            agent = restarted._create_agent("R-001 小需求开发", "item_developer.md")
+
+            self.assertEqual(agent.session_id, "legacy-string-session")
 
     def test_demand_agent_session_is_saved_and_restored(self):
         with tempfile.TemporaryDirectory() as work_dir:
@@ -242,13 +434,13 @@ class BreakPipelineTests(unittest.TestCase):
             self._write_requirement_files(work_dir, "R-001")
             self._write_index(work_dir, [(1, "R-001", "待实施", "无", "001-first.md")])
             pipeline._set_demand_status("拆分中", source="大需求")
-            previous_cursor = Agent._STRATEGY_MAP["cursor"]
-            Agent._STRATEGY_MAP["cursor"] = SessionReturningAgent
+            previous_codex = Agent._STRATEGY_MAP["codex"]
+            Agent._STRATEGY_MAP["codex"] = SessionReturningAgent
             try:
                 agent = pipeline._create_agent("需求拆分", "requirement_breaker.md")
                 agent.send_message("拆分")
             finally:
-                Agent._STRATEGY_MAP["cursor"] = previous_cursor
+                Agent._STRATEGY_MAP["codex"] = previous_codex
 
             plan = json.loads(Path(pipeline.execution_plan_file).read_text(encoding="utf-8"))
             self.assertEqual(plan["demand"]["agent_sessions"]["需求拆分"]["session_id"], "restored-session")
@@ -256,6 +448,74 @@ class BreakPipelineTests(unittest.TestCase):
             restarted = BreakPipeline(work_dir)
             restored = restarted._create_agent("需求拆分", "requirement_breaker.md")
             self.assertEqual(restored.session_id, "restored-session")
+
+    def test_breakdown_resource_blocker_forces_human_gate_before_review(self):
+        blocked = (
+            "FINAL_ANSWER\n```json\n"
+            '{"status":"blocked","approval_token":"","summary":"无法读取设计文件",'
+            '"blocker":{"kind":"file_unreadable","resource":"/tmp/design.fig",'
+            '"reason":"permission denied","required_user_action":"授予读取权限"}}\n```'
+        )
+        with tempfile.TemporaryDirectory() as work_dir:
+            pipeline = BreakPipeline(work_dir, skip_human=True)
+            breaker = MagicMock()
+            breaker.display_name = "需求拆分agent(codex)"
+            breaker.send_message.side_effect = [blocked, "拆分已更新"]
+            reviewer = MagicMock()
+            reviewer.send_message.return_value = "拆分方案通过"
+
+            def human_gate_response(stage_name, _review_file_path, skip_human, feedback_target=None):
+                if "资源访问阻塞" in stage_name:
+                    self.assertFalse(skip_human)
+                    self.assertEqual(feedback_target, "需求拆分agent(codex)")
+                    return "已授予读取权限"
+                self.assertTrue(skip_human)
+                return None
+
+            with patch.object(pipeline, "_create_agent", side_effect=[breaker, reviewer]), \
+                    patch("break_pipeline.human_gate", side_effect=human_gate_response) as gate, \
+                    patch("builtins.print") as output:
+                pipeline._run_breakdown("大需求")
+
+        gate.assert_any_call(
+            "1. 大需求拆分资源访问阻塞：无法读取设计文件",
+            pipeline.requirements_index_file,
+            skip_human=False,
+            feedback_target="需求拆分agent(codex)",
+        )
+        self.assertIn("已授予读取权限", breaker.send_message.call_args_list[1].args[0])
+        reviewer.send_message.assert_called_once()
+        printed = "\n".join(str(call.args[0]) for call in output.call_args_list if call.args)
+        self.assertIn("/tmp/design.fig", printed)
+        self.assertIn("permission denied", printed)
+        self.assertIn("授予读取权限", printed)
+
+    def test_breakdown_gate_ignores_unrelated_blocked_result(self):
+        response = (
+            "FINAL_ANSWER\n```json\n"
+            '{"status":"blocked","approval_token":"","summary":"等待产品决策",'
+            '"blocker":{"kind":"product_decision"}}\n```'
+        )
+
+        self.assertIsNone(BreakPipeline._breakdown_resource_blocker(response))
+
+    def test_breakdown_gate_ignores_unmarked_blocked_json(self):
+        response = (
+            "拆分过程记录：\n```json\n"
+            '{"status":"blocked","approval_token":"","summary":"无法读取设计文件",'
+            '"blocker":{"kind":"file_unreadable"}}\n```'
+        )
+
+        self.assertIsNone(BreakPipeline._breakdown_resource_blocker(response))
+
+    def test_breakdown_gate_ignores_incomplete_resource_blocker(self):
+        response = (
+            "FINAL_ANSWER\n```json\n"
+            '{"status":"blocked","approval_token":"","summary":"无法读取设计文件",'
+            '"blocker":{"kind":"file_unreadable","resource":"/tmp/design.fig"}}\n```'
+        )
+
+        self.assertIsNone(BreakPipeline._breakdown_resource_blocker(response))
 
     def test_breakdown_retries_reviewer_and_human_feedback(self):
         with tempfile.TemporaryDirectory() as work_dir:
@@ -560,9 +820,11 @@ class BreakPipelineTests(unittest.TestCase):
             pipeline = BreakPipeline(work_dir)
             self._write_requirement_files(work_dir, "R-001")
             self._write_index(work_dir, [(1, "R-001", "待人工确认", "无", "001-first.md")])
+            developer = MagicMock()
+            developer.display_name = "R-001 小需求开发agent(codex)"
 
             with patch("break_pipeline.human_gate", return_value="修正 R-001"):
-                pipeline._resume_human_gate(pipeline._load_items()[0])
+                pipeline._resume_human_gate(pipeline._load_items()[0], developer)
 
             saved_plan = json.loads(Path(pipeline.execution_plan_file).read_text(encoding="utf-8"))
             self.assertEqual(saved_plan["items"][0]["status"], "开发中")

@@ -1,4 +1,6 @@
+import io
 import unittest
+from contextlib import redirect_stdout
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -12,6 +14,35 @@ class AgentSessionTests(unittest.TestCase):
         agent.agent_impl = MagicMock()
         agent.agent_impl.run.side_effect = results
         return agent
+
+    def test_agent_builds_its_own_display_name(self):
+        with patch.object(Agent, "_load_system_prompt", return_value="system"):
+            agent = Agent("需求拆分", "prompt.md", "/work/repo", agent_type="codex")
+
+        self.assertEqual(agent.display_name, "需求拆分agent(codex)")
+
+    def test_agent_log_includes_current_pipeline_status(self):
+        with patch.object(Agent, "_load_system_prompt", return_value="system"):
+            agent = Agent(
+                "R-005 小需求验证审查",
+                "prompt.md",
+                "/work/repo",
+                agent_type="codex",
+                status_provider=lambda: "代码评审中",
+            )
+        agent.agent_impl = MagicMock()
+        agent.agent_impl.run.return_value = SimpleNamespace(
+            text="ok", session_id="chat-1", returncode=0, error=None,
+        )
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            agent.send_message("review")
+
+        self.assertIn(
+            "🤖 R-005 小需求验证审查agent(codex) — 当前状态: 代码评审中 — 第 1 次调用",
+            output.getvalue(),
+        )
 
     def test_saves_first_session_id_and_resumes_it_on_second_call(self):
         agent = self._agent_with_runner(
