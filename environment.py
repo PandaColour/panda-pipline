@@ -5,16 +5,21 @@ import shutil
 import subprocess
 
 
-PROJECT_ROOT = r"/Users/panda.colour/Company/ios3"
+PROJECT_ROOT = r"/Users/panda.colour/Company/android-wwl1b"
 REPOS = [
-    ("https://gitee.com/pandacolour/aiphone.git", "main")
+    ("https://gitee.com/pandacolour/aiphone.git", "android-tecp")
 ]
+
 DEFAULT_MEMORY_FILENAME = "loan_pipeline_default.md"
 DEFAULT_MEMORY_SOURCE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "default-memory")
 DEFAULT_MEMORY_INDEX_DESCRIPTIONS = {
     DEFAULT_MEMORY_FILENAME: "贷款系统开发流水线默认记忆，约束多国家、多端贷款项目的职责边界、通信协议、加解密、配置化、Mock 和验收纪律。",
     "Network/": "App 端网络协议和加解密基础设施 demo，供端侧接入真实协议时参考，不代表真实后端联调已通过。",
 }
+
+STATIC_ANALYSIS_TOOLS = ("detekt", "pmd", "checkstyle", "ruff", "swiftlint")
+STATIC_ANALYSIS_NPM_TOOLS = ("eslint",)
+CODEGRAPH_NPM_PACKAGE = "@colbymchenry/codegraph"
 
 
 def _repo_name(repo_url):
@@ -166,10 +171,94 @@ def _memory_index_entry_key(entry):
     return entry[start + 1:end]
 
 
+def _install_static_analysis_tools():
+    """在环境准备阶段安装多语言静态扫描依赖的全部 CLI 工具。
+
+    覆盖：detekt(Kotlin)/checkstyle(Java)/ruff(Python)/swiftlint(Swift) 经 Homebrew，
+    eslint(JS·TS) 经 npm；PMD CPD（代码重复）已含于 pmd。必须在扫描使用前完成安装，
+    避免到扫描时才发现缺失。
+    """
+    missing = [command for command in STATIC_ANALYSIS_TOOLS if shutil.which(command) is None]
+    if missing:
+        if shutil.which("brew") is None:
+            raise RuntimeError(
+                "缺少静态扫描工具（" + "、".join(missing) + "），且未找到 Homebrew，无法自动安装。"
+                "请先安装 Homebrew 后重试。"
+            )
+        print(f"  📦 安装静态扫描工具: {'、'.join(missing)}")
+        subprocess.run(["brew", "install", *missing], check=True)
+    for command in STATIC_ANALYSIS_NPM_TOOLS:
+        if shutil.which(command) is not None:
+            continue
+        if shutil.which("npm") is None:
+            print(f"  ⚠️ 未找到 npm，跳过 {command} 安装（JS/TS 静态扫描将降级为提示）。")
+            continue
+        print(f"  📦 安装静态扫描工具: {command}")
+        subprocess.run(["npm", "install", "-g", f"{command}@9"], check=True)
+    print("  ✅ 静态扫描工具已就绪: " + "、".join(STATIC_ANALYSIS_TOOLS + STATIC_ANALYSIS_NPM_TOOLS))
+
+
+def _ensure_codegraph_cli():
+    """Return the CodeGraph executable, installing it through npm when absent."""
+    codegraph_path = shutil.which("codegraph")
+    if codegraph_path is not None:
+        return codegraph_path
+
+    npm_path = shutil.which("npm")
+    if npm_path is None:
+        print("  ⚠️ CodeGraph 安装失败：未找到 npm；跳过代码图准备，继续执行流水线。")
+        return None
+
+    try:
+        print(f"  📦 安装 CodeGraph: {CODEGRAPH_NPM_PACKAGE}")
+        subprocess.run(
+            [npm_path, "install", "-g", CODEGRAPH_NPM_PACKAGE],
+            check=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as error:
+        print(f"  ⚠️ CodeGraph 安装失败：{error}；跳过代码图准备，继续执行流水线。")
+        return None
+
+    codegraph_path = shutil.which("codegraph")
+    if codegraph_path is None:
+        print("  ⚠️ CodeGraph 安装完成但命令不在 PATH 中；跳过代码图准备，继续执行流水线。")
+        return None
+    return codegraph_path
+
+
+def _work_dir_is_empty(work_dir):
+    """Treat VCS/index metadata alone as an empty project."""
+    if not os.path.isdir(work_dir):
+        return True
+    return not any(name not in {".git", ".codegraph"} for name in os.listdir(work_dir))
+
+
+def _prepare_codegraph(work_dir):
+    """Initialize or refresh CodeGraph without making it a pipeline prerequisite."""
+    codegraph_path = _ensure_codegraph_cli()
+    if codegraph_path is None:
+        return
+
+    index_path = os.path.join(work_dir, ".codegraph")
+    if not os.path.isdir(index_path) and _work_dir_is_empty(work_dir):
+        print("  ⚠️ CodeGraph 跳过初始化：工作目录为空；继续执行流水线。")
+        return
+
+    try:
+        action = "sync" if os.path.isdir(index_path) else "init"
+        print(f"  🕸️ CodeGraph {action}: {work_dir}")
+        subprocess.run([codegraph_path, action, work_dir], check=True)
+        subprocess.run([codegraph_path, "status", work_dir], check=True)
+    except (OSError, subprocess.CalledProcessError) as error:
+        print(f"  ⚠️ CodeGraph 准备失败：{error}；继续执行流水线。")
+
+
 def setup_environment():
     os.makedirs(PROJECT_ROOT, exist_ok=True)
+    _install_static_analysis_tools()
     for repo_url, branch in REPOS:
         _clone_or_pull(repo_url, branch, _repo_target_path(repo_url))
     work_dir = _resolve_agent_work_dir()
+    _prepare_codegraph(work_dir)
     _ensure_default_memory(work_dir)
     return work_dir

@@ -8,9 +8,11 @@ from unittest.mock import MagicMock, patch
 
 from agents import Agent
 from agents._result import AgentRunResult
+import break_pipeline
 from break_pipeline import BREAK_SYSTEM_PROMPT_DIR
 from break_pipeline import BreakPipeline
 from break_pipeline import RequirementItem
+import static_scan
 
 
 class SessionReturningAgent:
@@ -71,6 +73,175 @@ class BreakPipelineTests(unittest.TestCase):
             os.path.join(pipeline.requirements_dir, "R-001-login", "memory_report.md"),
         )
 
+    def test_item_artifacts_include_static_scan_report(self):
+        pipeline = BreakPipeline("workspace")
+        item = RequirementItem(
+            1, "R-001", "login", "待实施", [],
+            "R-001-login/user_requirements.md", "ok",
+        )
+
+        paths = pipeline._item_paths(item)
+
+        self.assertEqual(
+            paths["static_scan"],
+            os.path.join(pipeline.requirements_dir, "R-001-login", "static_scan_report.md"),
+        )
+
+    def test_static_scan_skips_when_no_source_files(self):
+        with tempfile.TemporaryDirectory() as work_dir:
+            report_path = os.path.join(work_dir, "static_scan_report.md")
+
+            with patch.object(static_scan, "_run_detekt") as detekt, \
+                    patch.object(static_scan, "_run_ruff") as ruff, \
+                    patch.object(static_scan, "_run_cpd") as cpd:
+                static_scan.run_static_scan(work_dir, report_path)
+
+            detekt.assert_not_called()
+            ruff.assert_not_called()
+            cpd.assert_not_called()
+            with open(report_path, encoding="utf-8") as report_file:
+                content = report_file.read()
+            self.assertIn("跳过静态扫描", content)
+
+    def test_static_scan_combines_language_rules_and_cpd(self):
+        with tempfile.TemporaryDirectory() as work_dir:
+            kt_dir = os.path.join(work_dir, "app", "src", "main")
+            os.makedirs(kt_dir)
+            with open(os.path.join(kt_dir, "Foo.kt"), "w", encoding="utf-8") as f:
+                f.write("package demo\nobject Foo {}\n")
+            py_dir = os.path.join(work_dir, "backend")
+            os.makedirs(py_dir)
+            with open(os.path.join(py_dir, "main.py"), "w", encoding="utf-8") as f:
+                f.write("def main():\n    pass\n")
+            report_path = os.path.join(work_dir, "static_scan_report.md")
+
+            with patch.object(static_scan, "_run_detekt", return_value="MagicNumber - 1000 at A.kt"), \
+                    patch.object(static_scan, "_run_ruff", return_value="PLR2004 at main.py"), \
+                    patch.object(static_scan, "_run_cpd", return_value="Found a duplication in A.kt and B.kt"):
+                static_scan.run_static_scan(work_dir, report_path)
+
+            with open(report_path, encoding="utf-8") as report_file:
+                content = report_file.read()
+            self.assertIn("Kotlin", content)
+            self.assertIn("MagicNumber", content)
+            self.assertIn("Python", content)
+            self.assertIn("PLR2004", content)
+            self.assertIn("代码重复", content)
+
+    def test_run_detekt_returns_note_when_tool_missing(self):
+        with patch("static_scan.shutil.which", return_value=None):
+            output = static_scan._run_detekt(["/tmp/Foo.kt"])
+
+        self.assertIn("未安装 detekt", output)
+
+    def test_run_cpd_returns_note_when_tool_missing(self):
+        with patch("static_scan.shutil.which", return_value=None):
+            output = static_scan._run_cpd("kotlin", ["/tmp/Foo.kt"])
+
+        self.assertIn("未安装 pmd", output)
+
+    def test_static_scan_main_writes_report(self):
+        with tempfile.TemporaryDirectory() as work_dir:
+            report_path = os.path.join(work_dir, "out", "static_scan_report.md")
+            with patch.object(static_scan, "run_static_scan") as run:
+                rc = static_scan.main(["--work-dir", work_dir, "--report", report_path])
+
+            self.assertEqual(rc, 0)
+            run.assert_called_once()
+            self.assertEqual(run.call_args.args[0], os.path.abspath(work_dir))
+            self.assertEqual(run.call_args.args[1], os.path.abspath(report_path))
+
+    def test_run_item_does_not_invoke_pipeline_static_scan(self):
+        with tempfile.TemporaryDirectory() as work_dir:
+            pipeline = BreakPipeline(work_dir)
+            self._write_requirement_files(work_dir, "R-001")
+            self._write_index(work_dir, [(1, "R-001", "待实施", "无", "001-first.md")])
+            item = pipeline._load_items()[0]
+            developer = MagicMock()
+            reviewer = MagicMock()
+            reviewer.send_message.return_value = "任务完成"
+
+            self.assertFalse(hasattr(pipeline, "_run_static_scan"))
+            with patch("break_pipeline.human_gate", return_value=None):
+                pipeline._run_item(item, developer, reviewer)
+
+            developer.send_message.assert_called()
+            reviewer.send_message.assert_called_once()
+            review_prompt = reviewer.send_message.call_args.args[0]
+            self.assertNotIn("static_scan_report.md", review_prompt)
+
+    def test_static_scan_status_is_not_valid(self):
+        self.assertNotIn("静态扫描中", break_pipeline.VALID_STATUSES)
+
+    def test_legacy_static_scan_status_maps_to_development(self):
+        from execution_plan import ExecutionPlanStore
+
+        self.assertEqual(
+            ExecutionPlanStore.normalize_status("静态扫描中", break_pipeline.VALID_STATUSES),
+            "开发中",
+        )
+
+    def test_item_goes_develop_then_review_without_static_scan_status(self):
+        with tempfile.TemporaryDirectory() as work_dir:
+            pipeline = BreakPipeline(work_dir)
+            self._write_requirement_files(work_dir, "R-001")
+            self._write_index(work_dir, [(1, "R-001", "待实施", "无", "001-first.md")])
+            item = pipeline._load_items()[0]
+            developer = MagicMock()
+            reviewer = MagicMock()
+            reviewer.send_message.return_value = "任务完成"
+
+            statuses = []
+            original_set_status = pipeline._set_status
+
+            def recording_set_status(requirement_id, status):
+                statuses.append(status)
+                original_set_status(requirement_id, status)
+
+            with patch.object(pipeline, "_set_status", side_effect=recording_set_status), \
+                    patch("break_pipeline.human_gate", return_value=None):
+                pipeline._run_item(item, developer, reviewer)
+
+            self.assertNotIn("静态扫描中", statuses)
+            self.assertIn("开发中", statuses)
+            self.assertIn("代码评审中", statuses)
+            self.assertLess(statuses.index("开发中"), statuses.index("代码评审中"))
+
+    def test_restart_at_legacy_static_scan_status_resumes_development(self):
+        with tempfile.TemporaryDirectory() as work_dir:
+            pipeline = BreakPipeline(work_dir)
+            self._write_requirement_files(work_dir, "R-001")
+            self._write_index(work_dir, [(1, "R-001", "静态扫描中", "无", "001-first.md")])
+            item = pipeline._load_items()[0]
+            self.assertEqual(item.status, "开发中")
+            developer = MagicMock()
+            reviewer = MagicMock()
+            reviewer.send_message.return_value = "任务完成"
+
+            with patch("break_pipeline.human_gate", return_value=None):
+                pipeline._run_item(item, developer, reviewer)
+
+            developer.send_message.assert_called()
+            reviewer.send_message.assert_called_once()
+            plan = json.loads(Path(pipeline.execution_plan_file).read_text(encoding="utf-8"))
+            self.assertEqual(plan["items"][0]["status"], "记忆整理中")
+
+    def test_restart_at_code_review_goes_straight_to_reviewer(self):
+        with tempfile.TemporaryDirectory() as work_dir:
+            pipeline = BreakPipeline(work_dir)
+            self._write_requirement_files(work_dir, "R-001")
+            self._write_index(work_dir, [(1, "R-001", "代码评审中", "无", "001-first.md")])
+            item = pipeline._load_items()[0]
+            developer = MagicMock()
+            reviewer = MagicMock()
+            reviewer.send_message.return_value = "任务完成"
+
+            with patch("break_pipeline.human_gate", return_value=None):
+                pipeline._run_item(item, developer, reviewer)
+
+            developer.send_message.assert_not_called()
+            reviewer.send_message.assert_called_once()
+
     def test_memory_status_is_runnable(self):
         pipeline = BreakPipeline("workspace")
         item = RequirementItem(1, "R-001", "login", "记忆整理中", [], "R-001-login/user_requirements.md", "ok")
@@ -79,7 +250,10 @@ class BreakPipelineTests(unittest.TestCase):
 
     def test_same_item_reuses_its_agent_set_for_rework(self):
         pipeline = BreakPipeline("workspace")
-        item = RequirementItem(1, "R-001", "login", "待实施", [], "R-001-login/user_requirements.md", "ok")
+        item = RequirementItem(
+            1, "R-001", "login", "待实施", [],
+            "R-001-login/user_requirements.md", "ok", execution_sequence=1,
+        )
 
         with patch.object(pipeline, "_create_agent", side_effect=lambda name, prompt: MagicMock(name=name)) as create_agent:
             first = pipeline._item_agents(item)
@@ -89,17 +263,266 @@ class BreakPipelineTests(unittest.TestCase):
         self.assertEqual(create_agent.call_count, 4)
         self.assertEqual(set(first), {"analyst", "requirements_reviewer", "developer", "code_reviewer"})
 
-    def test_different_items_get_different_agent_sets(self):
+    def test_first_five_items_share_one_agent_set_and_sixth_gets_a_new_set(self):
         pipeline = BreakPipeline("workspace")
-        first_item = RequirementItem(1, "R-001", "first", "待实施", [], "R-001-first/user_requirements.md", "ok")
-        second_item = RequirementItem(2, "R-002", "second", "待实施", [], "R-002-second/user_requirements.md", "ok")
+        first_item = RequirementItem(
+            1, "R-001", "first", "待实施", [],
+            "R-001-first/user_requirements.md", "ok", execution_sequence=1,
+        )
+        fifth_item = RequirementItem(
+            5, "R-005", "fifth", "待实施", [],
+            "R-005-fifth/user_requirements.md", "ok", execution_sequence=5,
+        )
+        sixth_item = RequirementItem(
+            6, "R-006", "sixth", "待实施", [],
+            "R-006-sixth/user_requirements.md", "ok", execution_sequence=6,
+        )
 
         with patch.object(pipeline, "_create_agent", side_effect=lambda name, prompt: MagicMock(name=name)) as create_agent:
             first = pipeline._item_agents(first_item)
-            second = pipeline._item_agents(second_item)
+            fifth = pipeline._item_agents(fifth_item)
+            sixth = pipeline._item_agents(sixth_item)
 
-        self.assertIsNot(first, second)
+        self.assertIs(first, fifth)
+        self.assertIsNot(first, sixth)
         self.assertEqual(create_agent.call_count, 8)
+
+    def test_agent_batches_follow_actual_execution_sequence_not_item_order(self):
+        pipeline = BreakPipeline("workspace")
+        first_executed = RequirementItem(
+            9,
+            "R-009",
+            "first-executed",
+            "待实施",
+            [],
+            "R-009/user_requirements.md",
+            "ok",
+            execution_sequence=1,
+        )
+        fifth_executed = RequirementItem(
+            2,
+            "R-002",
+            "fifth-executed",
+            "待实施",
+            [],
+            "R-002/user_requirements.md",
+            "ok",
+            execution_sequence=5,
+        )
+        sixth_executed = RequirementItem(
+            4,
+            "R-004",
+            "sixth-executed",
+            "待实施",
+            [],
+            "R-004/user_requirements.md",
+            "ok",
+            execution_sequence=6,
+        )
+
+        with patch.object(
+            pipeline,
+            "_create_agent",
+            side_effect=lambda name, prompt: MagicMock(name=name),
+        ) as create_agent:
+            first = pipeline._item_agents(first_executed)
+            fifth = pipeline._item_agents(fifth_executed)
+            sixth = pipeline._item_agents(sixth_executed)
+
+        self.assertIs(first, fifth)
+        self.assertIsNot(first, sixth)
+        self.assertEqual(create_agent.call_count, 8)
+
+    def test_actual_execution_sequence_is_persisted_when_order_is_skipped(self):
+        with tempfile.TemporaryDirectory() as work_dir:
+            pipeline = BreakPipeline(work_dir)
+            self._write_requirement_files(work_dir, "R-001", "R-002")
+            self._write_index(work_dir, [
+                (1, "R-001", "阻塞", "无", "001-first.md"),
+                (2, "R-002", "待实施", "无", "002-second.md"),
+            ])
+
+            items = pipeline._load_items()
+            first_executed = pipeline._next_runnable_item(items)
+            pipeline._ensure_item_execution_sequence(first_executed)
+
+            self.assertEqual(first_executed.requirement_id, "R-002")
+            self.assertEqual(first_executed.execution_sequence, 1)
+
+            restarted = BreakPipeline(work_dir)
+            persisted_items = restarted._load_items()
+            persisted_r002 = next(
+                item for item in persisted_items if item.requirement_id == "R-002"
+            )
+            self.assertEqual(persisted_r002.execution_sequence, 1)
+
+            restarted._set_status("R-002", "已完成")
+            restarted._set_status("R-001", "待开发")
+            second_executed = restarted._next_runnable_item(restarted._load_items())
+            restarted._ensure_item_execution_sequence(second_executed)
+
+            self.assertEqual(second_executed.requirement_id, "R-001")
+            self.assertEqual(second_executed.execution_sequence, 2)
+
+    def test_shared_agent_log_status_tracks_the_current_item(self):
+        with tempfile.TemporaryDirectory() as work_dir:
+            pipeline = BreakPipeline(work_dir)
+            self._write_requirement_files(work_dir, "R-001", "R-002")
+            self._write_index(work_dir, [
+                (1, "R-001", "已完成", "无", "001-first.md"),
+                (2, "R-002", "开发中", "无", "002-second.md"),
+            ])
+            current_item = pipeline._load_items()[1]
+            shared_agent = MagicMock()
+            shared_agent.name = "R-001 小需求开发"
+
+            pipeline._bind_item_agents(current_item, {"developer": shared_agent})
+
+            self.assertEqual(
+                pipeline._agent_status(shared_agent.name),
+                "R-002 · 开发中",
+            )
+
+    def test_current_item_log_includes_requirement_id_name_and_stage(self):
+        pipeline = BreakPipeline("workspace")
+        item = RequirementItem(
+            6,
+            "R-006",
+            "身份认证",
+            "需求分析中",
+            [],
+            "R-006-auth/user_requirements.md",
+            "ok",
+            execution_sequence=3,
+        )
+
+        with patch("builtins.print") as print_message:
+            pipeline._log_current_item(item)
+
+        print_message.assert_called_once_with(
+            "\n📌 当前处理小需求: R-006 身份认证"
+            "（拆分顺序 6，实际执行序号 3）— 当前阶段: 需求分析中"
+        )
+
+    def test_memory_checkpoints_are_first_every_fifth_and_last_item(self):
+        pipeline = BreakPipeline("workspace")
+        items = [
+            RequirementItem(
+                order,
+                f"R-{order:03d}",
+                f"item-{order}",
+                "待实施",
+                [],
+                f"R-{order:03d}/user_requirements.md",
+                "ok",
+                execution_sequence=order,
+            )
+            for order in range(1, 13)
+        ]
+
+        checkpoints = [
+            item.order
+            for item in items
+            if pipeline._should_save_item_memory(item, items)
+        ]
+        release_points = [
+            item.order
+            for item in items
+            if pipeline._should_release_item_agents(item, items)
+        ]
+
+        self.assertEqual(checkpoints, [1, 5, 10, 12])
+        self.assertEqual(release_points, [5, 10, 12])
+
+    def test_memory_checkpoint_collects_only_items_since_previous_save(self):
+        pipeline = BreakPipeline("workspace")
+        items = [
+            RequirementItem(
+                order,
+                f"R-{order:03d}",
+                f"item-{order}",
+                "待实施",
+                [],
+                f"R-{order:03d}/user_requirements.md",
+                "ok",
+                execution_sequence=order,
+            )
+            for order in range(1, 13)
+        ]
+
+        self.assertEqual(
+            [item.order for item in pipeline._memory_checkpoint_items(items[0], items)],
+            [1],
+        )
+        self.assertEqual(
+            [item.order for item in pipeline._memory_checkpoint_items(items[4], items)],
+            [2, 3, 4, 5],
+        )
+        self.assertEqual(
+            [item.order for item in pipeline._memory_checkpoint_items(items[9], items)],
+            [6, 7, 8, 9, 10],
+        )
+        self.assertEqual(
+            [item.order for item in pipeline._memory_checkpoint_items(items[11], items)],
+            [11, 12],
+        )
+
+    def test_execution_rotates_four_agents_and_saves_memory_at_checkpoints(self):
+        with tempfile.TemporaryDirectory() as work_dir:
+            pipeline = BreakPipeline(work_dir)
+            self._write_requirement_files(
+                work_dir,
+                *(f"R-{order:03d}" for order in range(1, 13)),
+            )
+            self._write_index(work_dir, [
+                (
+                    order,
+                    f"R-{order:03d}",
+                    "待实施",
+                    "无",
+                    f"R-{order:03d}-{'first' if order == 1 else 'second'}/user_requirements.md",
+                )
+                for order in range(1, 13)
+            ])
+
+            def finish_review(item, _developer, _reviewer):
+                pipeline._set_status(item.requirement_id, "记忆整理中")
+
+            memory_calls = []
+
+            def save_memory(item, _agents, **kwargs):
+                memory_calls.append((item.order, kwargs))
+                pipeline._set_status(item.requirement_id, "已完成")
+
+            with patch.object(
+                pipeline,
+                "_create_agent",
+                side_effect=lambda name, _prompt: MagicMock(name=name),
+            ) as create_agent, patch.object(
+                pipeline,
+                "_run_item",
+                side_effect=finish_review,
+            ), patch.object(
+                pipeline,
+                "_run_item_memory",
+                side_effect=save_memory,
+            ):
+                completed = pipeline._run_execution()
+
+            self.assertTrue(completed)
+            self.assertEqual(create_agent.call_count, 12)
+            self.assertEqual([order for order, _kwargs in memory_calls], [1, 5, 10, 12])
+            self.assertEqual(
+                [kwargs["release_agents"] for _order, kwargs in memory_calls],
+                [False, True, True, True],
+            )
+            self.assertEqual(
+                [
+                    [memory_item.order for memory_item in kwargs["memory_items"]]
+                    for _order, kwargs in memory_calls
+                ],
+                [[1], [2, 3, 4, 5], [6, 7, 8, 9, 10], [11, 12]],
+            )
 
     def test_memory_completion_releases_current_item_agents(self):
         pipeline = BreakPipeline("workspace")
@@ -148,7 +571,7 @@ class BreakPipelineTests(unittest.TestCase):
             self._write_index(work_dir, [(1, "R-001", "记忆整理中", "无", "001-first.md")])
             item = RequirementItem(
                 1, "R-001", "name", "记忆整理中", [],
-                "R-001-first/user_requirements.md", "ok",
+                "R-001-first/user_requirements.md", "ok", execution_sequence=1,
             )
             agents = self._item_agent_set()
 
@@ -189,7 +612,7 @@ class BreakPipelineTests(unittest.TestCase):
             self._write_index(work_dir, [(1, "R-001", "记忆整理中", "无", "001-first.md")])
             item = RequirementItem(
                 1, "R-001", "name", "记忆整理中", [],
-                "R-001-first/user_requirements.md", "ok",
+                "R-001-first/user_requirements.md", "ok", execution_sequence=1,
             )
             agents = self._item_agent_set()
 
@@ -973,6 +1396,25 @@ class BreakPipelineTests(unittest.TestCase):
             "source_index_sha256": hashlib.sha256(index_file.read_bytes()).hexdigest(),
             "items": items,
         }, ensure_ascii=False), encoding="utf-8")
+
+    def test_breakdown_prompts_require_static_scan_requirement(self):
+        breaker = Path(BREAK_SYSTEM_PROMPT_DIR, "requirement_breaker.md").read_text(encoding="utf-8")
+        reviewer = Path(BREAK_SYSTEM_PROMPT_DIR, "requirement_break_reviewer.md").read_text(encoding="utf-8")
+        self.assertIn("静态扫描小需求", breaker)
+        self.assertIn("需求类型: 静态扫描", breaker)
+        self.assertIn("python3 static_scan.py", breaker)
+        self.assertIn("最后一项", breaker)
+        self.assertIn("静态扫描小需求门禁", reviewer)
+        self.assertIn("需求类型: 静态扫描", reviewer)
+
+    def test_item_prompts_branch_on_static_scan_requirement_type(self):
+        developer = Path(BREAK_SYSTEM_PROMPT_DIR, "item_developer.md").read_text(encoding="utf-8")
+        code_reviewer = Path(BREAK_SYSTEM_PROMPT_DIR, "item_code_reviewer.md").read_text(encoding="utf-8")
+        self.assertIn("需求类型: 静态扫描", developer)
+        self.assertIn("python3 static_scan.py --work-dir", developer)
+        self.assertIn("把静态扫描当作本项交付步骤", developer)
+        self.assertIn("仅当 `user_requirements.md` 标明 `需求类型: 静态扫描`", code_reviewer)
+        self.assertIn("普通功能小需求跳过本条", code_reviewer)
 
 
 if __name__ == "__main__":

@@ -4,6 +4,17 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
+ITEM_ANALYST_PROMPT = ROOT / "break-system-prompt" / "item_requirements_analyst.md"
+ITEM_REQUIREMENTS_REVIEWER_PROMPT = ROOT / "break-system-prompt" / "item_requirements_reviewer.md"
+ITEM_DEVELOPER_PROMPT = ROOT / "break-system-prompt" / "item_developer.md"
+ITEM_CODE_REVIEWER_PROMPT = ROOT / "break-system-prompt" / "item_code_reviewer.md"
+ITEM_PROMPTS = [
+    ITEM_ANALYST_PROMPT,
+    ITEM_REQUIREMENTS_REVIEWER_PROMPT,
+    ITEM_DEVELOPER_PROMPT,
+    ITEM_CODE_REVIEWER_PROMPT,
+]
+
 ANALYSIS_PROMPTS = [
     ROOT / "system-prompt" / "requirements_analyst.md",
     ROOT / "break-system-prompt" / "requirement_breaker.md",
@@ -116,6 +127,49 @@ PROMPT_FOCUS_REQUIREMENTS = {
 
 
 class BackendMaterialPromptContractTests(unittest.TestCase):
+    def test_primary_analysis_prompts_use_existing_codegraph_index_before_text_search(self):
+        prompt_files = [
+            ROOT / "break-system-prompt" / "requirement_breaker.md",
+            ROOT / "system-prompt" / "requirements_analyst.md",
+        ]
+        for prompt_file in prompt_files:
+            content = prompt_file.read_text(encoding="utf-8")
+            self.assertIn(".codegraph/", content, prompt_file.name)
+            self.assertIn('codegraph explore "<问题、符号或文件>"', content, prompt_file.name)
+            self.assertIn("优先于 `rg`", content, prompt_file.name)
+            self.assertIn("不得自行安装或初始化 CodeGraph", content, prompt_file.name)
+            self.assertIn("失败时回退", content, prompt_file.name)
+
+    def test_item_prompts_define_acceptance_criteria_as_closed_delivery_boundary(self):
+        for prompt_file in ITEM_PROMPTS:
+            content = prompt_file.read_text(encoding="utf-8")
+            self.assertIn("封闭验收边界", content, prompt_file.name)
+            self.assertIn("不得新增隐含验收条件", content, prompt_file.name)
+
+    def test_break_item_validation_is_selected_by_acceptance_type(self):
+        analyst = ITEM_ANALYST_PROMPT.read_text(encoding="utf-8")
+        developer = ITEM_DEVELOPER_PROMPT.read_text(encoding="utf-8")
+        reviewer = ITEM_CODE_REVIEWER_PROMPT.read_text(encoding="utf-8")
+        for content in (analyst, developer, reviewer):
+            self.assertIn("纯逻辑、状态、数据转换", content)
+            self.assertIn("UI 展示、点击、跳转", content)
+            self.assertIn("阶段性集成", content)
+        self.assertIn("不得机械要求安装、启动或设备截图", developer)
+        self.assertIn("不得因缺少设备冒烟而拒绝通过", reviewer)
+
+    def test_developer_prompt_requires_minimum_sufficient_implementation(self):
+        content = ITEM_DEVELOPER_PROMPT.read_text(encoding="utf-8")
+        self.assertIn("最小充分实现", content)
+        self.assertIn("禁止为理论风险扩展", content)
+        self.assertIn("CAS、Mutex、版本系统", content)
+
+    def test_code_reviewer_prompt_requires_convergent_re_review(self):
+        content = ITEM_CODE_REVIEWER_PROMPT.read_text(encoding="utf-8")
+        self.assertIn("首轮一次性", content)
+        self.assertIn("稳定 issue ID", content)
+        self.assertIn("修复直接引入的回归", content)
+        self.assertIn("不得新增与原 issue 无关的阻断项", content)
+
     def test_prompt_files_declare_core_focus_points(self):
         for prompt_file, focus_terms in PROMPT_FOCUS_REQUIREMENTS.items():
             content = prompt_file.read_text(encoding="utf-8")
@@ -141,6 +195,25 @@ class BackendMaterialPromptContractTests(unittest.TestCase):
         self.assertIn("本批次临时公共信息", reviewer)
         self.assertIn("planned/unverified", reviewer)
         self.assertIn("不得通过", reviewer)
+
+    def test_breakdown_prompts_require_per_target_delivery_levels(self):
+        prompts = [
+            ROOT / "break-system-prompt" / "requirement_breaker.md",
+            ROOT / "break-system-prompt" / "requirement_break_reviewer.md",
+        ]
+        for prompt_file in prompts:
+            content = prompt_file.read_text(encoding="utf-8")
+            for value in (
+                "android", "ios", "java-backend", "logic", "buildable", "runnable", "deployable",
+            ):
+                self.assertIn(value, content, prompt_file.name)
+            self.assertIn("交付目标与级别", content, prompt_file.name)
+            self.assertIn("逐目标", content, prompt_file.name)
+            self.assertIn("基础工程", content, prompt_file.name)
+
+        breaker = prompts[0].read_text(encoding="utf-8")
+        self.assertIn("R-001", breaker)
+        self.assertIn("android: deployable", breaker)
 
     def test_breakdown_resource_blocker_requires_original_url_in_human_gate_summary(self):
         writer = (ROOT / "break-system-prompt" / "requirement_breaker.md").read_text(encoding="utf-8")
@@ -187,6 +260,31 @@ class BackendMaterialPromptContractTests(unittest.TestCase):
         self.assertIn("不得仅因缺少真实端到端验证而不通过", reviewer)
         self.assertIn("应输出 `approved`", reviewer)
         self.assertNotIn("status=requirement_change", reviewer)
+
+    def test_item_requirement_prompts_define_platform_delivery_gate_details(self):
+        analyst = (ROOT / "break-system-prompt" / "item_requirements_analyst.md").read_text(
+            encoding="utf-8"
+        )
+        reviewer = (ROOT / "break-system-prompt" / "item_requirements_reviewer.md").read_text(
+            encoding="utf-8"
+        )
+
+        for content in (analyst, reviewer):
+            for value in (
+                "android", "ios", "java-backend", "logic", "buildable", "runnable", "deployable",
+            ):
+                self.assertIn(value, content)
+            self.assertIn("交付门禁明细", content)
+            self.assertIn("不得降级", content)
+            self.assertIn("compileKotlin", content)
+            self.assertIn("compileJava", content)
+
+        for column in (
+            "测试命令", "构建命令", "制品路径", "启动/健康验证", "环境/签名/配置验证",
+        ):
+            self.assertIn(column, analyst)
+        self.assertIn("扫描仓库", analyst)
+        self.assertIn("低于 `deployable`", reviewer)
 
     def test_item_requirement_prompts_allow_documented_conservative_product_decisions(self):
         prompt_files = [
@@ -300,15 +398,33 @@ class BackendMaterialPromptContractTests(unittest.TestCase):
             self.assertNotIn("不编写或修改测试代码", content, prompt_file.name)
             self.assertNotIn("不编写测试代码", content, prompt_file.name)
 
-    def test_developer_prompts_require_minimum_smoke_tests_and_layered_fallback(self):
-        for prompt_file in DEVELOPER_PROMPTS:
-            content = prompt_file.read_text(encoding="utf-8")
-            self.assertIn("最小冒烟测试", content, prompt_file.name)
-            self.assertIn("不得仅以源码对齐、编译通过或脚本验证替代运行验证", content, prompt_file.name)
-            self.assertIn("构建、安装、启动", content, prompt_file.name)
-            self.assertIn("mock/stub", content, prompt_file.name)
-            self.assertIn("不得将 mock 冒烟结果描述为真实端到端验收", content, prompt_file.name)
-            self.assertIn("IDE Run `app`", content, prompt_file.name)
+    def test_generic_developer_prompt_keeps_minimum_smoke_test(self):
+        content = (ROOT / "system-prompt" / "code_developer.md").read_text(encoding="utf-8")
+        self.assertIn("最小冒烟测试", content)
+        self.assertIn("不得仅以源码对齐、编译通过或脚本验证替代运行验证", content)
+        self.assertIn("构建、安装、启动", content)
+        self.assertIn("mock/stub", content)
+        self.assertIn("不得将 mock 冒烟结果描述为真实端到端验收", content)
+        self.assertIn("IDE Run `app`", content)
+
+    def test_break_developer_prompt_uses_conditional_runtime_validation(self):
+        content = ITEM_DEVELOPER_PROMPT.read_text(encoding="utf-8")
+        self.assertIn("按 AC 类型选择最小验证", content)
+        self.assertIn("定向单元测试", content)
+        self.assertIn("不得机械要求安装、启动或设备截图", content)
+        self.assertIn("完整 Android/iOS 设备回归集中在阶段性集成需求", content)
+        self.assertIn("不得将 mock 结果描述为真实端到端验收", content)
+
+    def test_android_smoke_prompts_require_adb_hard_timeout(self):
+        developer = (ROOT / "break-system-prompt" / "item_developer.md").read_text(encoding="utf-8")
+        reviewer = (ROOT / "break-system-prompt" / "item_code_reviewer.md").read_text(encoding="utf-8")
+        self.assertIn("开发 Agent 负责启停", developer)
+        self.assertIn("subprocess.run", developer)
+        self.assertIn("timeout=30", developer)
+        self.assertIn("waiting for device", developer)
+        self.assertIn("接手启停设备", reviewer)
+        self.assertNotIn("adb_safe.py", developer)
+        self.assertNotIn("adb_safe.py", reviewer)
 
     def test_review_prompts_allow_disclosed_mocks_but_require_backend_todo(self):
         for prompt_file in REVIEW_PROMPTS:
@@ -318,14 +434,19 @@ class BackendMaterialPromptContractTests(unittest.TestCase):
             self.assertIn("缺少后端不可用原因、mock 方法/位置/范围或 TODO", content, prompt_file.name)
             self.assertIn("TODO：请人类使用者尽快补充后端接口信息并完善代码", content, prompt_file.name)
 
-    def test_code_review_prompts_require_mock_network_tests_when_credentials_or_network_block_real_validation(self):
-        for prompt_file in CODE_REVIEW_PROMPTS:
-            content = prompt_file.read_text(encoding="utf-8")
-            self.assertIn("测试账号", content, prompt_file.name)
-            self.assertIn("网络环境", content, prompt_file.name)
-            self.assertIn("mock 网络请求", content, prompt_file.name)
-            self.assertIn("开发测试验证", content, prompt_file.name)
-            self.assertIn("不得通过", content, prompt_file.name)
+    def test_generic_code_review_requires_mock_network_tests_for_external_blockers(self):
+        content = (ROOT / "system-prompt" / "code_reviewer.md").read_text(encoding="utf-8")
+        self.assertIn("测试账号", content)
+        self.assertIn("网络环境", content)
+        self.assertIn("mock 网络请求", content)
+        self.assertIn("开发测试验证", content)
+        self.assertIn("不得通过", content)
+
+    def test_break_code_review_limits_mock_validation_to_current_acceptance_boundary(self):
+        content = ITEM_CODE_REVIEWER_PROMPT.read_text(encoding="utf-8")
+        self.assertIn("当前 AC 可控边界", content)
+        self.assertIn("不得因外部条件不可用要求重复返工", content)
+        self.assertIn("不得循环要求 developer 恢复外部环境", content)
 
     def test_item_code_reviewer_routes_external_blockers_without_developer_rework_loop(self):
         prompt_file = ROOT / "break-system-prompt" / "item_code_reviewer.md"
@@ -338,15 +459,54 @@ class BackendMaterialPromptContractTests(unittest.TestCase):
         self.assertIn("不得重复返回 changes_requested", content)
         self.assertIn("不得猜测协议或安全策略", content)
 
-    def test_code_review_prompts_block_missing_minimum_smoke_tests(self):
-        for prompt_file in CODE_REVIEW_PROMPTS:
-            content = prompt_file.read_text(encoding="utf-8")
-            self.assertIn("最小冒烟测试审查", content, prompt_file.name)
-            self.assertIn("仅有源码分析、编译通过、脚本验证", content, prompt_file.name)
-            self.assertIn("账号、权限、网络或后端不可用不是跳过冒烟测试的理由", content, prompt_file.name)
-            self.assertIn("分层冒烟测试", content, prompt_file.name)
-            self.assertIn("不得通过", content, prompt_file.name)
-            self.assertIn("IDE Run `app`", content, prompt_file.name)
+    def test_item_code_reviewer_routes_unverifiable_required_ac_to_requirement_change(self):
+        content = ITEM_CODE_REVIEWER_PROMPT.read_text(encoding="utf-8")
+
+        self.assertNotIn("blocked", content)
+        self.assertIn("外部条件导致“必须”AC无法达到 required_level", content)
+        self.assertIn("统一返回 `requirement_change`", content)
+        self.assertIn("不得输出 `approved` 或 `changes_requested`", content)
+
+    def test_item_delivery_prompts_execute_and_review_per_target_delivery_gates(self):
+        developer = (ROOT / "break-system-prompt" / "item_developer.md").read_text(
+            encoding="utf-8"
+        )
+        reviewer = ITEM_CODE_REVIEWER_PROMPT.read_text(encoding="utf-8")
+
+        for content in (developer, reviewer):
+            for value in (
+                "android", "ios", "java-backend", "logic", "buildable", "runnable", "deployable",
+            ):
+                self.assertIn(value, content)
+            self.assertIn("逐目标", content)
+            self.assertIn("完整构建", content)
+            self.assertIn("compileKotlin", content)
+            self.assertIn("compileJava", content)
+            self.assertIn("上传应用商店", content)
+            self.assertIn("发布生产", content)
+
+        self.assertIn("develop_report.md", developer)
+        self.assertIn("实际执行", developer)
+        self.assertIn("test_report.md", reviewer)
+        self.assertIn("较低级别证据", reviewer)
+        self.assertIn("统一返回 `requirement_change`", reviewer)
+        self.assertNotIn("blocked", reviewer)
+
+    def test_generic_code_review_prompt_blocks_missing_minimum_smoke_tests(self):
+        content = (ROOT / "system-prompt" / "code_reviewer.md").read_text(encoding="utf-8")
+        self.assertIn("最小冒烟测试审查", content)
+        self.assertIn("仅有源码分析、编译通过、脚本验证", content)
+        self.assertIn("账号、权限、网络或后端不可用不是跳过冒烟测试的理由", content)
+        self.assertIn("分层冒烟测试", content)
+        self.assertIn("不得通过", content)
+        self.assertIn("IDE Run `app`", content)
+
+    def test_break_code_review_prompt_uses_conditional_runtime_validation(self):
+        content = ITEM_CODE_REVIEWER_PROMPT.read_text(encoding="utf-8")
+        self.assertIn("条件式运行验证审查", content)
+        self.assertIn("不得因为项目是移动端就机械要求", content)
+        self.assertIn("不得因缺少设备冒烟而拒绝通过", content)
+        self.assertIn("阶段性集成", content)
 
     def test_review_prompts_allow_evidence_based_inference_without_fabrication(self):
         for prompt_file in REVIEW_PROMPTS:
@@ -366,13 +526,18 @@ class BackendMaterialPromptContractTests(unittest.TestCase):
             self.assertIn("不满足上述要求", content, prompt_file.name)
             self.assertIn("要求开发 Agent 修改", content, prompt_file.name)
 
-    def test_code_review_prompts_block_missing_framework_dependency_reuse_scan(self):
-        for prompt_file in CODE_REVIEW_PROMPTS:
-            content = prompt_file.read_text(encoding="utf-8")
-            self.assertIn("重点检查 developer 是否在开发前扫描当前代码的框架、依赖包和已有封装", content, prompt_file.name)
-            self.assertIn("能用项目既有框架、依赖包或已有代码实现", content, prompt_file.name)
-            self.assertIn("重复造轮子", content, prompt_file.name)
-            self.assertIn("不得通过", content, prompt_file.name)
+    def test_generic_code_review_blocks_missing_framework_dependency_reuse_scan(self):
+        content = (ROOT / "system-prompt" / "code_reviewer.md").read_text(encoding="utf-8")
+        self.assertIn("重点检查 developer 是否在开发前扫描当前代码的框架、依赖包和已有封装", content)
+        self.assertIn("能用项目既有框架、依赖包或已有代码实现", content)
+        self.assertIn("重复造轮子", content)
+        self.assertIn("不得通过", content)
+
+    def test_break_code_review_only_blocks_reuse_defects_with_delivery_impact(self):
+        content = ITEM_CODE_REVIEWER_PROMPT.read_text(encoding="utf-8")
+        self.assertIn("重复造轮子只有已造成", content)
+        self.assertIn("对应 AC 或失败证据", content)
+        self.assertIn("否则作为非阻断建议", content)
 
     def test_code_review_prompts_allow_well_disclosed_requirement_gaps(self):
         for prompt_file in CODE_REVIEW_PROMPTS:
@@ -390,18 +555,17 @@ class BackendMaterialPromptContractTests(unittest.TestCase):
             self.assertIn("写入 `test_report.md`", content, prompt_file.name)
             self.assertIn("执行必要测试", content, prompt_file.name)
 
-    def test_ui_code_review_prompts_require_implementation_screenshot_comparison(self):
-        prompt_files = [
-            ROOT / "system-prompt" / "code_reviewer.md",
-            ROOT / "break-system-prompt" / "item_code_reviewer.md",
-        ]
-        for prompt_file in prompt_files:
-            content = prompt_file.read_text(encoding="utf-8")
-            self.assertIn("actual_screens", content, prompt_file.name)
-            self.assertIn("视觉对比表", content, prompt_file.name)
-            self.assertIn("图标尺寸", content, prompt_file.name)
-            self.assertIn("静态验证", content, prompt_file.name)
-            self.assertIn("环境阻塞", content, prompt_file.name)
+    def test_ui_code_review_prompts_require_relevant_implementation_screenshot_comparison(self):
+        generic = (ROOT / "system-prompt" / "code_reviewer.md").read_text(encoding="utf-8")
+        item = ITEM_CODE_REVIEWER_PROMPT.read_text(encoding="utf-8")
+        for content in (generic, item):
+            self.assertIn("actual_screens", content)
+            self.assertIn("视觉对比表", content)
+            self.assertIn("静态验证", content)
+            self.assertIn("环境阻塞", content)
+        self.assertIn("图标尺寸", generic)
+        self.assertIn("只对当前“必须”UI AC", item)
+        self.assertIn("不得扩张到 AC 未提及", item)
 
     def test_memory_writer_prompts_define_memory_routing(self):
         for prompt_file in MEMORY_WRITER_PROMPTS:

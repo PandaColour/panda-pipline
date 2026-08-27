@@ -14,6 +14,7 @@ LEGACY_ITEM_STATUS_MAP = {
     "待实施": "待开发",
     "返工中": "开发中",
     "待记忆整理": "记忆整理中",
+    "静态扫描中": "开发中",
 }
 
 
@@ -256,6 +257,7 @@ class ExecutionPlanStore:
             "acceptance_summary": str,
         }
         optional_list_fields = {"acceptance_ids"}
+        execution_sequences = set()
         for item in plan["items"]:
             if not isinstance(item, dict):
                 raise ValueError("执行计划条目格式无效。")
@@ -267,6 +269,14 @@ class ExecutionPlanStore:
                     raise ValueError(f"执行计划条目字段类型无效（应为 list）: {field}")
                 if field in item and not all(isinstance(v, str) for v in item[field]):
                     raise ValueError(f"执行计划条目字段元素类型无效（应为 str）: {field}")
+            if "execution_sequence" in item and (
+                type(item["execution_sequence"]) is not int or item["execution_sequence"] < 1
+            ):
+                raise ValueError("执行计划条目的实际执行序号无效。")
+            if "execution_sequence" in item:
+                if item["execution_sequence"] in execution_sequences:
+                    raise ValueError("执行计划条目的实际执行序号重复。")
+                execution_sequences.add(item["execution_sequence"])
             normalized_status = ExecutionPlanStore.normalize_status(item["status"], valid_statuses)
             if normalized_status != item["status"]:
                 item["status"] = normalized_status

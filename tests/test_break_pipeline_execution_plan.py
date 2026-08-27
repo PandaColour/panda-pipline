@@ -292,6 +292,44 @@ class BreakExecutionPlanTests(unittest.TestCase):
         saved_plan = json.loads(Path(self.pipeline.execution_plan_file).read_text(encoding="utf-8"))
         self.assertEqual(saved_plan["items"][0]["pending_feedback"]["message"], "保留这条反馈")
 
+    def test_renormalization_preserves_actual_execution_sequence(self):
+        previous_plan = self._demand_plan(status="开发中")
+        previous_plan["items"][0]["execution_sequence"] = 3
+        self._write_plan(previous_plan)
+        self.index_file.write_text("# 仅修改说明文字\\n", encoding="utf-8")
+        normalizer = MagicMock()
+        normalizer.send_message.side_effect = lambda _message: self._write_plan(
+            self._demand_plan(status="待开发")
+        )
+
+        with patch.object(self.pipeline, "_create_agent", return_value=normalizer):
+            items = self.pipeline._load_items()
+
+        self.assertEqual(items[0].execution_sequence, 3)
+
+    def test_load_items_rejects_duplicate_actual_execution_sequence(self):
+        plan = self._plan()
+        duplicate = dict(plan["items"][0])
+        duplicate.update({
+            "order": 2,
+            "id": "R-002",
+            "name": "second",
+            "requirements_file": "R-002-second/user_requirements.md",
+        })
+        Path(self.requirements_dir, "R-002-second").mkdir()
+        Path(self.requirements_dir, "R-002-second", "user_requirements.md").write_text(
+            "# R-002\n", encoding="utf-8"
+        )
+        plan["items"][0]["execution_sequence"] = 1
+        duplicate["execution_sequence"] = 1
+        plan["items"].append(duplicate)
+        self._write_plan(plan)
+
+        normalizer = MagicMock()
+        with patch.object(self.pipeline, "_create_agent", return_value=normalizer), \
+                self.assertRaisesRegex(ValueError, "实际执行序号重复"):
+            self.pipeline._load_items()
+
     def test_load_items_rejects_non_string_dependency_with_value_error(self):
         plan = self._plan()
         plan["items"][0]["dependencies"] = [1]

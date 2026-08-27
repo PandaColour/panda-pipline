@@ -5,6 +5,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pipeline
+import static_scan
 from config import SYSTEM_PROMPT_DIR
 from pipeline import Pipeline
 
@@ -245,6 +247,227 @@ class PipelinePathTests(unittest.TestCase):
             code_reviewer.send_message.assert_called_once()
             plan = json.loads(Path(pipeline.execution_plan_file).read_text(encoding="utf-8"))
             self.assertEqual(plan["items"][0]["status"], "记忆整理中")
+
+    def test_static_scan_status_is_valid(self):
+        self.assertIn("静态扫描中", pipeline.VALID_STATUSES)
+
+    def test_development_reviewer_prompt_includes_static_scan_report(self):
+        with tempfile.TemporaryDirectory() as work_dir:
+            pipeline = Pipeline(work_dir)
+            developer = MagicMock()
+            code_reviewer = MagicMock()
+            code_reviewer.send_message.return_value = "任务完成"
+            agents = {
+                "代码开发": developer,
+                "代码验证审查": code_reviewer,
+            }
+
+            with patch.object(pipeline, "_create_agent", side_effect=lambda name, prompt: agents[name]), \
+                    patch.object(pipeline, "_run_static_scan"), \
+                    patch("pipeline.human_gate", return_value=None):
+                pipeline._run_stage_2_development()
+
+            reviewer_prompt = code_reviewer.send_message.call_args.args[0]
+            self.assertIn(pipeline.static_scan_report_file, reviewer_prompt)
+
+    def test_stage2_passes_through_static_scan_status(self):
+        with tempfile.TemporaryDirectory() as work_dir:
+            pipeline = Pipeline(work_dir)
+            pipeline._ensure_execution_plan("new project")
+            developer = MagicMock()
+            code_reviewer = MagicMock()
+            code_reviewer.send_message.return_value = "任务完成"
+            agents = {
+                "代码开发": developer,
+                "代码验证审查": code_reviewer,
+            }
+            statuses = []
+            original_set_status = pipeline._set_status
+
+            def recording_set_status(status):
+                statuses.append(status)
+                original_set_status(status)
+
+            with patch.object(pipeline, "_create_agent", side_effect=lambda name, prompt: agents[name]), \
+                    patch.object(pipeline, "_set_status", side_effect=recording_set_status), \
+                    patch.object(pipeline, "_run_static_scan"), \
+                    patch("pipeline.human_gate", return_value=None):
+                pipeline._run_stage_2_development()
+
+            self.assertIn("静态扫描中", statuses)
+            self.assertLess(statuses.index("静态扫描中"), statuses.index("代码评审中"))
+
+    def test_restart_at_static_scan_resumes_scan_then_review(self):
+        with tempfile.TemporaryDirectory() as work_dir:
+            pipeline = Pipeline(work_dir)
+            pipeline._ensure_execution_plan("new project")
+            pipeline._set_status("静态扫描中")
+            developer = MagicMock()
+            code_reviewer = MagicMock()
+            code_reviewer.send_message.return_value = "任务完成"
+            agents = {
+                "代码开发": developer,
+                "代码验证审查": code_reviewer,
+            }
+
+            with patch.object(pipeline, "_create_agent", side_effect=lambda name, prompt: agents[name]), \
+                    patch.object(pipeline, "_run_static_scan") as scan, \
+                    patch("pipeline.human_gate", return_value=None):
+                pipeline._run_stage_2_development()
+
+            scan.assert_called_once()
+            developer.send_message.assert_not_called()
+            plan = json.loads(Path(pipeline.execution_plan_file).read_text(encoding="utf-8"))
+            self.assertEqual(plan["items"][0]["status"], "记忆整理中")
+
+    def test_restart_at_code_review_skips_rescan_when_report_exists(self):
+        with tempfile.TemporaryDirectory() as work_dir:
+            pipeline = Pipeline(work_dir)
+            pipeline._ensure_execution_plan("new project")
+            pipeline._set_status("代码评审中")
+            with open(pipeline.static_scan_report_file, "w", encoding="utf-8") as report_file:
+                report_file.write("# 代码静态扫描报告\n")
+            developer = MagicMock()
+            code_reviewer = MagicMock()
+            code_reviewer.send_message.return_value = "任务完成"
+            agents = {
+                "代码开发": developer,
+                "代码验证审查": code_reviewer,
+            }
+
+            with patch.object(pipeline, "_create_agent", side_effect=lambda name, prompt: agents[name]), \
+                    patch.object(pipeline, "_run_static_scan") as scan, \
+                    patch("pipeline.human_gate", return_value=None):
+                pipeline._run_stage_2_development()
+
+            scan.assert_not_called()
+            code_reviewer.send_message.assert_called_once()
+
+    def test_restart_at_code_review_rescans_when_report_missing(self):
+        with tempfile.TemporaryDirectory() as work_dir:
+            pipeline = Pipeline(work_dir)
+            pipeline._ensure_execution_plan("new project")
+            pipeline._set_status("代码评审中")
+            developer = MagicMock()
+            code_reviewer = MagicMock()
+            code_reviewer.send_message.return_value = "任务完成"
+            agents = {
+                "代码开发": developer,
+                "代码验证审查": code_reviewer,
+            }
+
+            with patch.object(pipeline, "_create_agent", side_effect=lambda name, prompt: agents[name]), \
+                    patch.object(pipeline, "_run_static_scan") as scan, \
+                    patch("pipeline.human_gate", return_value=None):
+                pipeline._run_stage_2_development()
+
+            scan.assert_called_once()
+
+    def test_run_dispatches_static_scan_status_to_stage2(self):
+        with tempfile.TemporaryDirectory() as work_dir:
+            pipeline = Pipeline(work_dir)
+            pipeline._ensure_execution_plan("new project")
+            pipeline._set_status("静态扫描中")
+
+            with patch.object(pipeline, "_run_stage_1_requirements") as requirements, \
+                    patch.object(pipeline, "_run_stage_2_development") as development, \
+                    patch.object(pipeline, "_run_final_reflection") as reflection:
+                pipeline.run("new project")
+
+            requirements.assert_not_called()
+            development.assert_called_once_with()
+            reflection.assert_not_called()
+
+    def test_static_scan_skips_when_no_source_files(self):
+        with tempfile.TemporaryDirectory() as work_dir:
+            report_path = os.path.join(work_dir, "static_scan_report.md")
+
+            with patch.object(static_scan, "_run_detekt") as detekt, \
+                    patch.object(static_scan, "_run_ruff") as ruff, \
+                    patch.object(static_scan, "_run_cpd") as cpd:
+                static_scan.run_static_scan(work_dir, report_path)
+
+            detekt.assert_not_called()
+            ruff.assert_not_called()
+            cpd.assert_not_called()
+            with open(report_path, encoding="utf-8") as report_file:
+                content = report_file.read()
+            self.assertIn("跳过静态扫描", content)
+
+    def test_static_scan_combines_language_rules_and_cpd(self):
+        with tempfile.TemporaryDirectory() as work_dir:
+            kt_dir = os.path.join(work_dir, "app", "src", "main")
+            os.makedirs(kt_dir)
+            with open(os.path.join(kt_dir, "Foo.kt"), "w", encoding="utf-8") as f:
+                f.write("package demo\nobject Foo {}\n")
+            py_dir = os.path.join(work_dir, "backend")
+            os.makedirs(py_dir)
+            with open(os.path.join(py_dir, "main.py"), "w", encoding="utf-8") as f:
+                f.write("def main():\n    pass\n")
+            report_path = os.path.join(work_dir, "static_scan_report.md")
+
+            with patch.object(static_scan, "_run_detekt", return_value="MagicNumber - 1000 at A.kt"), \
+                    patch.object(static_scan, "_run_ruff", return_value="PLR2004 at main.py"), \
+                    patch.object(static_scan, "_run_cpd", return_value="Found a duplication in A.kt and B.kt"):
+                static_scan.run_static_scan(work_dir, report_path)
+
+            with open(report_path, encoding="utf-8") as report_file:
+                content = report_file.read()
+            self.assertIn("Kotlin", content)
+            self.assertIn("MagicNumber", content)
+            self.assertIn("Python", content)
+            self.assertIn("PLR2004", content)
+            self.assertIn("代码重复", content)
+
+    def test_run_detekt_returns_note_when_tool_missing(self):
+        with patch("static_scan.shutil.which", return_value=None):
+            output = static_scan._run_detekt(["/tmp/Foo.kt"])
+
+        self.assertIn("未安装 detekt", output)
+
+    def test_run_cpd_returns_note_when_tool_missing(self):
+        with patch("static_scan.shutil.which", return_value=None):
+            output = static_scan._run_cpd("kotlin", ["/tmp/Foo.kt"])
+
+        self.assertIn("未安装 pmd", output)
+
+    def test_scan_config_exclude_dirs_extend_defaults(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = os.path.join(tmp, "scan_config.json")
+            with open(config_path, "w", encoding="utf-8") as config_file:
+                config_file.write(json.dumps({"exclude_dirs": ["mock-server", "aux_tool"]}))
+
+            with patch.object(static_scan, "SCAN_CONFIG_PATH", config_path):
+                excluded = static_scan.exclude_dirs()
+
+            self.assertIn("mock-server", excluded)
+            self.assertIn("aux_tool", excluded)
+            self.assertIn("build", excluded)
+
+    def test_run_static_scan_excludes_configured_dirs(self):
+        with tempfile.TemporaryDirectory() as work_dir, tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(os.path.join(work_dir, "app"))
+            with open(os.path.join(work_dir, "app", "main.py"), "w", encoding="utf-8") as f:
+                f.write("def main():\n    return 1000\n")
+            os.makedirs(os.path.join(work_dir, "mock-server"))
+            with open(os.path.join(work_dir, "mock-server", "aux.py"), "w", encoding="utf-8") as f:
+                f.write("def aux():\n    return 2000\n")
+            config_path = os.path.join(tmp, "scan_config.json")
+            with open(config_path, "w", encoding="utf-8") as config_file:
+                config_file.write(json.dumps({"exclude_dirs": ["mock-server"]}))
+            report_path = os.path.join(work_dir, "static_scan_report.md")
+            captured = {}
+
+            def fake_ruff(files):
+                captured["files"] = list(files)
+                return ""
+
+            with patch.object(static_scan, "SCAN_CONFIG_PATH", config_path), \
+                    patch.object(static_scan, "_run_ruff", side_effect=fake_ruff):
+                static_scan.run_static_scan(work_dir, report_path)
+
+            self.assertTrue(any(file.endswith("main.py") for file in captured["files"]))
+            self.assertFalse(any("mock-server" in file for file in captured["files"]))
 
     def test_run_after_process_restart_resumes_from_execution_plan_status(self):
         with tempfile.TemporaryDirectory() as work_dir:

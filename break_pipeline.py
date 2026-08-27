@@ -17,6 +17,7 @@ BREAKDOWN_APPROVAL = "拆分方案通过"
 ITEM_APPROVAL = "任务完成"
 REQUIREMENTS_APPROVAL = "同意方案"
 MAX_REQUIREMENT_REVIEW_ATTEMPTS = 3
+ITEM_AGENT_BATCH_SIZE = 5
 VALID_STATUSES = {
     "待审核",
     "需求分析中",
@@ -41,6 +42,7 @@ class RequirementItem:
     dependencies: list[str]
     filename: str
     acceptance: str
+    execution_sequence: int | None = None
 
 
 class BreakPipeline:
@@ -57,6 +59,7 @@ class BreakPipeline:
         self.prompt_dir = BREAK_SYSTEM_PROMPT_DIR
         self.agents = {}
         self._active_item_agents = {}
+        self._active_agent_requirements = {}
         self._pending_human_feedback = {}
         self._pending_requirement_feedback = {}
 
@@ -104,7 +107,8 @@ class BreakPipeline:
         except (OSError, ValueError):
             return None
 
-        requirement_id = self._agent_requirement_id(agent_name)
+        requirement_id = self._active_agent_requirements.get(agent_name)
+        requirement_id = requirement_id or self._agent_requirement_id(agent_name)
         if requirement_id:
             status = next(
                 (
@@ -118,7 +122,9 @@ class BreakPipeline:
             status = plan.get("demand", {}).get("status")
 
         status = ExecutionPlanStore.normalize_status(status, VALID_STATUSES)
-        return status if status in VALID_STATUSES else None
+        if status not in VALID_STATUSES:
+            return None
+        return f"{requirement_id} · {status}" if requirement_id else status
 
     def _render_break_prompt(self, prompt_file, **values):
         template_path = os.path.join(self.prompt_dir, prompt_file)
@@ -160,22 +166,46 @@ class BreakPipeline:
         return requirement_id if requirement_id.startswith("R-") else None
 
     def _item_agents(self, item):
-        """Create one complete agent set per item and retain it through rework."""
-        if item.requirement_id not in self._active_item_agents:
-            prefix = item.requirement_id
-            self._active_item_agents[item.requirement_id] = {
+        """Reuse one complete four-agent set for each five-item batch."""
+        batch_key = self._item_agent_batch_key(item)
+        if batch_key not in self._active_item_agents:
+            prefix = batch_key
+            self._active_item_agents[batch_key] = {
                 "analyst": self._create_agent(f"{prefix} 小需求需求分析", "item_requirements_analyst.md"),
                 "requirements_reviewer": self._create_agent(f"{prefix} 小需求需求评审", "item_requirements_reviewer.md"),
                 "developer": self._create_agent(f"{prefix} 小需求开发", "item_developer.md"),
                 "code_reviewer": self._create_agent(f"{prefix} 小需求验证审查", "item_code_reviewer.md"),
             }
-        return self._active_item_agents[item.requirement_id]
+        return self._active_item_agents[batch_key]
 
-    def _release_item_agents(self, requirement_id):
-        """Release an item only after its memory organization has completed."""
-        item_agents = self._active_item_agents.pop(requirement_id, {})
+    @staticmethod
+    def _item_agent_batch_key(item):
+        if item.execution_sequence is None:
+            raise ValueError(f"需求 {item.requirement_id} 尚未分配实际执行序号。")
+        batch_start = (
+            (item.execution_sequence - 1) // ITEM_AGENT_BATCH_SIZE
+        ) * ITEM_AGENT_BATCH_SIZE + 1
+        return f"批次-{batch_start:03d}"
+
+    def _release_item_agents(self, batch_key):
+        """Release a five-item agent batch after its final memory checkpoint."""
+        item_agents = self._active_item_agents.pop(batch_key, {})
         for agent in item_agents.values():
+            self._active_agent_requirements.pop(agent.name, None)
             self.agents.pop(agent.name, None)
+
+    def _bind_item_agents(self, item, item_agents):
+        for agent in item_agents.values():
+            self._active_agent_requirements[agent.name] = item.requirement_id
+
+    @staticmethod
+    def _log_current_item(item):
+        execution_sequence = item.execution_sequence or "未分配"
+        print(
+            f"\n📌 当前处理小需求: {item.requirement_id} {item.name}"
+            f"（拆分顺序 {item.order}，实际执行序号 {execution_sequence}）"
+            f"— 当前阶段: {item.status}"
+        )
 
     def run(self, user_idea=None):
         if user_idea is not None:
@@ -313,7 +343,10 @@ class BreakPipeline:
         items = self._load_items()
         self._validate_items(items)
         while item := self._next_runnable_item(items):
+            self._ensure_item_execution_sequence(item)
             item_agents = self._item_agents(item)
+            self._bind_item_agents(item, item_agents)
+            self._log_current_item(item)
             if item.status in {"需求分析中", "需求评审中"}:
                 self._run_item_requirements(item, item_agents["analyst"], item_agents["requirements_reviewer"])
                 items = self._load_items()
@@ -330,13 +363,33 @@ class BreakPipeline:
                 self._validate_items(items)
                 continue
             if item.status == "记忆整理中":
-                self._run_item_memory(item, item_agents)
+                if self._should_save_item_memory(item, items):
+                    self._run_item_memory(
+                        item,
+                        item_agents,
+                        memory_items=self._memory_checkpoint_items(item, items),
+                        release_agents=self._should_release_item_agents(item, items),
+                    )
+                else:
+                    self._set_status(item.requirement_id, "已完成")
                 items = self._load_items()
                 self._validate_items(items)
                 continue
             self._run_item(item, item_agents["developer"], item_agents["code_reviewer"])
             items = self._load_items()
             self._validate_items(items)
+            completed_item = next(
+                candidate
+                for candidate in items
+                if candidate.requirement_id == item.requirement_id
+            )
+            if (
+                completed_item.status == "记忆整理中"
+                and not self._should_save_item_memory(completed_item, items)
+            ):
+                self._set_status(completed_item.requirement_id, "已完成")
+                items = self._load_items()
+                self._validate_items(items)
         unfinished = [item for item in items if item.status not in {"已完成"}]
         if unfinished:
             self._mark_blocked_items(items)
@@ -416,6 +469,8 @@ class BreakPipeline:
         develop_report = paths["develop"]
         test_report = paths["test"]
         review_report = paths["code_review"]
+        # 静态扫描不再由流水线强制插入；由拆分阶段编排的「静态扫描」小需求
+        # 在开发回合内由开发 Agent 自行调用 static_scan.py 完成。
         if item.status != "代码评审中":
             self._set_status(item.requirement_id, "开发中")
             initial_message = (
@@ -474,12 +529,77 @@ class BreakPipeline:
             self._set_pending_feedback(item.requirement_id, "human", "待人工确认", feedback)
             self._set_status(item.requirement_id, "开发中")
 
-    def _run_item_memory(self, item, item_agents):
+    @staticmethod
+    def _item_position(item, items):
+        if item.execution_sequence is None:
+            raise ValueError(f"需求 {item.requirement_id} 尚未分配实际执行序号。")
+        return item.execution_sequence
+
+    @staticmethod
+    def _is_final_executed_item(item, items):
+        assigned_sequences = [
+            candidate.execution_sequence
+            for candidate in items
+            if candidate.execution_sequence is not None
+        ]
+        return (
+            len(assigned_sequences) == len(items)
+            and item.execution_sequence == max(assigned_sequences)
+        )
+
+    @classmethod
+    def _should_save_item_memory(cls, item, items):
+        position = cls._item_position(item, items)
+        return (
+            position == 1
+            or position % ITEM_AGENT_BATCH_SIZE == 0
+            or cls._is_final_executed_item(item, items)
+        )
+
+    @classmethod
+    def _should_release_item_agents(cls, item, items):
+        position = cls._item_position(item, items)
+        return (
+            position % ITEM_AGENT_BATCH_SIZE == 0
+            or cls._is_final_executed_item(item, items)
+        )
+
+    @classmethod
+    def _memory_checkpoint_items(cls, item, items):
+        position = cls._item_position(item, items)
+        if position == 1:
+            previous_checkpoint = 0
+        elif position <= ITEM_AGENT_BATCH_SIZE:
+            previous_checkpoint = 1
+        else:
+            previous_checkpoint = ((position - 1) // ITEM_AGENT_BATCH_SIZE) * ITEM_AGENT_BATCH_SIZE
+        return sorted(
+            (
+                candidate
+                for candidate in items
+                if candidate.execution_sequence is not None
+                and previous_checkpoint < candidate.execution_sequence <= position
+            ),
+            key=lambda candidate: candidate.execution_sequence,
+        )
+
+    def _run_item_memory(self, item, item_agents, memory_items=None, release_agents=True):
         paths = self._item_paths(item)
         self._set_status(item.requirement_id, "记忆整理中")
-        report_paths = (
-            f"{paths['requirements']}、{paths['requirements_analysis']}、{paths['requirements_review']}、"
-            f"{paths['develop']}、{paths['test']}、{paths['code_review']}"
+        memory_items = memory_items or [item]
+        report_paths = "；".join(
+            "、".join(
+                (
+                    item_paths["requirements"],
+                    item_paths["requirements_analysis"],
+                    item_paths["requirements_review"],
+                    item_paths["develop"],
+                    item_paths["test"],
+                    item_paths["code_review"],
+                    item_paths["static_scan"],
+                )
+            )
+            for item_paths in (self._item_paths(memory_item) for memory_item in memory_items)
         )
         memory_dir = os.path.join(self.work_dir, "memory") + os.sep
         curation_messages = {
@@ -512,7 +632,8 @@ class BreakPipeline:
         for role, message in curation_messages.items():
             item_agents[role].send_message(message)
         self._set_status(item.requirement_id, "已完成")
-        self._release_item_agents(item.requirement_id)
+        if release_agents:
+            self._release_item_agents(self._item_agent_batch_key(item))
 
     @staticmethod
     def _is_requirement_change(feedback):
@@ -538,6 +659,7 @@ class BreakPipeline:
             "develop": os.path.join(workspace, "develop_report.md"),
             "test": os.path.join(workspace, "test_report.md"),
             "code_review": os.path.join(workspace, "code_review.md"),
+            "static_scan": os.path.join(workspace, "static_scan_report.md"),
             "memory_report": os.path.join(workspace, "memory_report.md"),
             "bug": os.path.join(workspace, "bug_report.md"),
         }
@@ -553,11 +675,41 @@ class BreakPipeline:
             RequirementItem(
                 raw_item["order"], raw_item["id"], raw_item["name"], raw_item["status"],
                 raw_item["dependencies"], raw_item["requirements_file"], raw_item["acceptance_summary"],
+                raw_item.get("execution_sequence"),
             )
             for raw_item in plan["items"]
         ]
         self._validate_items(items)
         return sorted(items, key=lambda item: item.order)
+
+    def _ensure_item_execution_sequence(self, item):
+        if item.execution_sequence is not None:
+            return item.execution_sequence
+        plan = self.execution_plan.read()
+        self.execution_plan.normalize_plan(plan, VALID_STATUSES)
+        self.execution_plan.validate(plan, VALID_STATUSES, self.execution_plan.index_hash())
+        assigned_sequences = {
+            raw_item.get("execution_sequence")
+            for raw_item in plan["items"]
+            if isinstance(raw_item.get("execution_sequence"), int)
+        }
+        next_sequence = max(assigned_sequences, default=0) + 1
+
+        # Old plans did not persist actual execution order. Preserve their completed
+        # work deterministically before assigning the next live item.
+        for raw_item in sorted(plan["items"], key=lambda candidate: candidate["order"]):
+            if raw_item["status"] == "已完成" and raw_item.get("execution_sequence") is None:
+                raw_item["execution_sequence"] = next_sequence
+                next_sequence += 1
+
+        for raw_item in plan["items"]:
+            if raw_item["id"] == item.requirement_id:
+                if raw_item.get("execution_sequence") is None:
+                    raw_item["execution_sequence"] = next_sequence
+                item.execution_sequence = raw_item["execution_sequence"]
+                self.execution_plan.write(plan)
+                return item.execution_sequence
+        raise ValueError(f"找不到需求 ID: {item.requirement_id}")
 
     def _ensure_execution_plan(self):
         if self.execution_plan.is_current(VALID_STATUSES):
@@ -637,6 +789,12 @@ class BreakPipeline:
                 else:
                     item.pop("agent_sessions", None)
                 changed = True
+            if item.get("execution_sequence") != previous_item.get("execution_sequence"):
+                if "execution_sequence" in previous_item:
+                    item["execution_sequence"] = previous_item.get("execution_sequence")
+                else:
+                    item.pop("execution_sequence", None)
+                changed = True
             if item.get("acceptance_ids") != previous_item.get("acceptance_ids"):
                 if "acceptance_ids" in previous_item:
                     item["acceptance_ids"] = previous_item.get("acceptance_ids")
@@ -669,6 +827,7 @@ class BreakPipeline:
             RequirementItem(
                 raw_item["order"], raw_item["id"], raw_item["name"], raw_item["status"],
                 raw_item["dependencies"], raw_item["requirements_file"], raw_item["acceptance_summary"],
+                raw_item.get("execution_sequence"),
             )
             for raw_item in plan["items"]
         ])
@@ -677,6 +836,7 @@ class BreakPipeline:
         ids = set()
         filenames = set()
         orders = set()
+        execution_sequences = set()
         positions = {item.requirement_id: item.order for item in items}
         for item in items:
             if item.requirement_id in ids:
@@ -685,6 +845,12 @@ class BreakPipeline:
             if item.order in orders:
                 raise ValueError(f"重复需求顺序: {item.order}")
             orders.add(item.order)
+            if item.execution_sequence is not None:
+                if item.execution_sequence < 1:
+                    raise ValueError(f"实际执行序号无效: {item.requirement_id}")
+                if item.execution_sequence in execution_sequences:
+                    raise ValueError(f"重复实际执行序号: {item.execution_sequence}")
+                execution_sequences.add(item.execution_sequence)
             if item.status not in VALID_STATUSES:
                 raise ValueError(f"未知需求状态: {item.status}")
             if (
@@ -825,7 +991,11 @@ class BreakPipeline:
         if breaker is None:
             breaker = self._create_agent("需求拆分", "requirement_breaker.md")
         items = self._load_items()
-        memory_reports = [self._item_paths(item)["memory_report"] for item in items]
+        memory_reports = [
+            memory_report
+            for item in items
+            if os.path.isfile(memory_report := self._item_paths(item)["memory_report"])
+        ]
         breaker.send_message(
             self._render_break_prompt(
                 MEMORY_CURATION_PROMPT,

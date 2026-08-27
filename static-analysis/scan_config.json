@@ -1,0 +1,12 @@
+{
+  "exclude_dirs": [
+    "mock-server",
+    "node_modules",
+    "Pods",
+    ".build",
+    "dist",
+    "__pycache__",
+    ".mypy_cache",
+    ".pytest_cache"
+  ]
+}

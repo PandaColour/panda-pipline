@@ -3,6 +3,7 @@ from agents import Agent
 from config import SYSTEM_PROMPT_DIR
 from execution_plan import ExecutionPlanStore
 from review_decision import review_passed, structured_final_answer_decision
+from static_scan import resolve_scan_root, run_static_scan
 from workflow import human_gate
 
 MAX_REQUIREMENT_REVIEW_ATTEMPTS = 3
@@ -13,6 +14,7 @@ VALID_STATUSES = {
     "待需求人工确认",
     "待开发",
     "开发中",
+    "静态扫描中",
     "代码评审中",
     "待人工确认",
     "记忆整理中",
@@ -40,6 +42,7 @@ class Pipeline:
         self.develop_report_file = os.path.join(self.requirement_dir, "develop_report.md")
         self.test_report_file = os.path.join(self.requirement_dir, "test_report.md")
         self.code_review_file = os.path.join(self.requirement_dir, "code_review.md")
+        self.static_scan_report_file = os.path.join(self.requirement_dir, "static_scan_report.md")
         self.bug_report_file = os.path.join(self.requirement_dir, "bug_report.md")
         self.memory_report_file = os.path.join(self.requirement_dir, "memory_report.md")
         self.prompt_dir = SYSTEM_PROMPT_DIR
@@ -146,7 +149,7 @@ class Pipeline:
         if status in {"需求分析中", "需求评审中", "待需求人工确认"}:
             self._run_stage_1_requirements()
             status = self._item_status()
-        if status in {"待开发", "开发中", "代码评审中", "待人工确认"}:
+        if status in {"待开发", "开发中", "静态扫描中", "代码评审中", "待人工确认"}:
             self._run_stage_2_development()
             status = self._item_status()
         if status == "记忆整理中":
@@ -225,6 +228,7 @@ class Pipeline:
                     "develop_report": f"{REQUIREMENT_DIR_NAME}/develop_report.md",
                     "test_report": f"{REQUIREMENT_DIR_NAME}/test_report.md",
                     "code_review": f"{REQUIREMENT_DIR_NAME}/code_review.md",
+                    "static_scan": f"{REQUIREMENT_DIR_NAME}/static_scan_report.md",
                     "memory_report": f"{REQUIREMENT_DIR_NAME}/memory_report.md",
                 },
             }],
@@ -335,6 +339,14 @@ class Pipeline:
         developer = self._create_agent("代码开发", "code_developer.md")
         code_reviewer = self._create_agent("代码验证审查", "code_reviewer.md")
 
+        # 静态扫描拥有独立状态：开发完成后进入“静态扫描中”，扫描完成后再进入“代码评审中”。
+        # 重启时若处于“静态扫描中”则续跑扫描；若已处于“代码评审中”且扫描报告存在，
+        # 直接进入评审，避免对未变更代码重复扫描；报告缺失（如旧计划升级）则补扫一次。
+        current_status = self._item_status()
+        scan_pending = current_status == "静态扫描中" or (
+            current_status == "代码评审中" and not os.path.isfile(self.static_scan_report_file)
+        )
+
         while True:
             status = self._item_status()
             if status == "待人工确认":
@@ -344,6 +356,12 @@ class Pipeline:
                     break
                 self._set_pending_feedback("human", "待人工确认", human_feedback)
                 self._set_status("开发中")
+                continue
+
+            if scan_pending or status == "静态扫描中":
+                self._run_static_scan()
+                self._set_status("代码评审中")
+                scan_pending = False
                 continue
 
             if status != "代码评审中":
@@ -359,11 +377,13 @@ class Pipeline:
                     develop_prompt += f"\n待处理反馈：{feedback}\n请仅修正当前需求。"
                 developer.send_message(develop_prompt)
                 self._clear_pending_feedback()
-                self._set_status("代码评审中")
+                self._set_status("静态扫描中")
+                scan_pending = True
+                continue
 
             review_response = code_reviewer.send_message(
                 f"请先阅读 {self.user_requirements_file}、"
-                f"{self.develop_report_file} 和 {self.work_dir} 下的代码、测试。"
+                f"{self.develop_report_file}、{self.static_scan_report_file} 和 {self.work_dir} 下的代码、测试。"
                 f"执行必要测试，并将测试范围、命令、结果和遗留问题写入 {self.test_report_file}；"
                 f"如有 Bug 生成 {self.bug_report_file}。"
                 f"然后审查 {self.work_dir} 下的代码和测试。"
@@ -388,7 +408,8 @@ class Pipeline:
                     f"\n请根据意见修改代码。"
                 )
                 self._clear_pending_feedback()
-                self._set_status("代码评审中")
+                self._set_status("静态扫描中")
+                scan_pending = True
             else:
                 self._set_pending_feedback("code_review", "代码评审中", review_response)
                 self._set_status("开发中")
@@ -397,7 +418,17 @@ class Pipeline:
                     f"\n请根据意见修改代码。"
                 )
                 self._clear_pending_feedback()
-                self._set_status("代码评审中")
+                self._set_status("静态扫描中")
+                scan_pending = True
+
+    # ==================== Static code scan ====================
+
+    def _run_static_scan(self):
+        """多语言静态扫描（Kotlin/Java/Python/JS/TS/Swift），结果写入 static_scan_report.md。
+
+        具体实现见 static_scan 模块（pipeline.py 与 break_pipeline.py 共用，彼此独立）。
+        """
+        run_static_scan(resolve_scan_root(self.work_dir), self.static_scan_report_file)
 
     def _item_status(self):
         plan = self.execution_plan.read()
@@ -475,7 +506,7 @@ class Pipeline:
         memory_dir = os.path.join(self.work_dir, "memory") + os.sep
         report_paths = (
             f"{self.user_requirements_file}、{self.develop_report_file}、"
-            f"{self.test_report_file}、{self.code_review_file}"
+            f"{self.test_report_file}、{self.code_review_file}、{self.static_scan_report_file}"
         )
         curation_messages = {
             "需求分析": self._render_system_prompt(

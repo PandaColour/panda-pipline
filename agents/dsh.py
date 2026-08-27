@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 import time
@@ -10,13 +11,23 @@ from ._cli import executable_name
 # dsh-cmd-starter (https://github.com/PandaColour/dsh-cmd-starter) 提供
 # Claude-Code 风格的无头调度参数。`--output-format json` 让每次运行在 stdout
 # 输出单行 JSON，含 sessionId，供这里解析并复用为下一次 `--resume`。
+# 默认 MCP（飞书项目 Meegle）已装在 dsh 的 headless profile 里，无需这里处理。
 DSH_BASE_CMD = [
     executable_name("dsh"),
     "--profile", "headless",
-    "--output-format", "json",
 ]
+# 默认模型：DeepSeek 多模态实验模型（需 dsh 版本支持 inputModalities 字段）。
+DEFAULT_PROVIDER = "deepseek-official"
+DEFAULT_MODEL = "deepseek-v4-flash-vision-exp"
 MAX_RETRIES = 3
 RETRY_DELAY_SECONDS = 5
+
+
+def _subprocess_env():
+    """Build the DSH child environment with its launch-only permission setting."""
+    env = os.environ.copy()
+    env["DSH_PERMISSION_MODE"] = "danger-full-access"
+    return env
 
 
 def _find_result_line(stdout):
@@ -35,8 +46,20 @@ def _find_result_line(stdout):
 
 
 class DshAgent:
-    def run(self, work_dir, message, system_prompt=None, session_id=None, add_dirs=None):
-        result = self._run_once(work_dir, message, system_prompt, session_id, add_dirs)
+    def run(
+        self,
+        work_dir,
+        message,
+        system_prompt=None,
+        session_id=None,
+        add_dirs=None,
+        patch_files=None,
+        provider=None,
+        model=None,
+    ):
+        result = self._run_once(
+            work_dir, message, system_prompt, session_id, add_dirs, patch_files, provider, model,
+        )
         for _attempt in range(MAX_RETRIES):
             if result.returncode == 0:
                 return result
@@ -47,11 +70,27 @@ class DshAgent:
                 system_prompt,
                 result.session_id or session_id,
                 add_dirs,
+                patch_files,
+                provider,
+                model,
             )
         return result
 
-    def _run_once(self, work_dir, message, system_prompt=None, session_id=None, add_dirs=None):
+    def _run_once(
+        self, work_dir, message, system_prompt=None, session_id=None, add_dirs=None,
+        patch_files=None, provider=None, model=None,
+    ):
         cmd = DSH_BASE_CMD.copy()
+
+        # launcher 参数：--patch（必须在 app 参数之前）。额外 patch 由调用方传入。
+        for patch_file in patch_files or []:
+            cmd.extend(["--patch", patch_file])
+
+        # app 参数（从这里起交给 dsh-cmd-starter 解析）。
+        cmd.extend(["--output-format", "json"])
+        # 模型切换：默认 deepseek-v4-flash-vision-exp（多模态），可覆盖。
+        cmd.extend(["--provider", provider or DEFAULT_PROVIDER])
+        cmd.extend(["--model", model or DEFAULT_MODEL])
         if session_id:
             # dsh-cmd-starter 的 --resume 同时接受 session id 和 --name 别名。
             cmd.extend(["--resume", session_id])
@@ -71,6 +110,7 @@ class DshAgent:
             process = subprocess.Popen(
                 cmd, cwd=work_dir, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT, text=True, encoding="utf-8", bufsize=1,
+                env=_subprocess_env(),
             )
             stdout, _ = process.communicate()
             data = _find_result_line(stdout)
