@@ -1,24 +1,32 @@
+from pipeline_tasks import PipelineTaskMixin, CALL_FAILURE
 """Large-requirement breakdown and per-item delivery workflow."""
 
 import ntpath
+import json
 import os
 import posixpath
 from dataclasses import dataclass
+from datetime import datetime
 
 from agents import Agent
+from config import get_agent_type
 from execution_plan import ExecutionPlanStore
 from review_decision import review_passed, structured_final_answer_decision, structured_review_decision
+from review_context import CodeReviewContext, DEVELOPMENT_HANDOFF
 from workflow import human_gate
+from task_protocol import read_resource_blocker
+from workflow_blockers import (
+    REVIEW_EXHAUSTED, SUSPENDED_STATUSES,
+    STAGE_RESULT_INSTRUCTION, external_blocker,
+)
 
 
 BREAK_SYSTEM_PROMPT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "break-system-prompt")
 MEMORY_CURATION_PROMPT = "memory_curation.md"
-BREAKDOWN_APPROVAL = "拆分方案通过"
-ITEM_APPROVAL = "任务完成"
-REQUIREMENTS_APPROVAL = "同意方案"
-MAX_REQUIREMENT_REVIEW_ATTEMPTS = 3
+REQUIREMENT_SUMMARY_PROMPT = "requirement_summary.md"
+MAX_STAGE_ATTEMPTS = 10
 ITEM_AGENT_BATCH_SIZE = 5
-VALID_STATUSES = {
+VALID_STATUSES = SUSPENDED_STATUSES | {
     "待审核",
     "需求分析中",
     "需求评审中",
@@ -45,7 +53,7 @@ class RequirementItem:
     execution_sequence: int | None = None
 
 
-class BreakPipeline:
+class BreakPipeline(PipelineTaskMixin):
     """Break a large request down, then deliver its approved items in order."""
 
     def __init__(self, work_dir, skip_human=False):
@@ -56,12 +64,15 @@ class BreakPipeline:
         self.execution_plan = ExecutionPlanStore(self.requirements_dir, self.requirements_index_file)
         self.execution_plan_file = self.execution_plan.plan_file
         self.breakdown_approval_file = os.path.join(self.requirements_dir, ".breakdown-approved")
+        self.requirement_summary_file = os.path.join(self.requirements_dir, "requirement_summary.md")
         self.prompt_dir = BREAK_SYSTEM_PROMPT_DIR
         self.agents = {}
         self._active_item_agents = {}
         self._active_agent_requirements = {}
         self._pending_human_feedback = {}
         self._pending_requirement_feedback = {}
+        self._logged_item_starts = set()
+        self._logged_item_completions = set()
 
     def _human_gate(self, stage_name, review_file_path=None, feedback_agent=None):
         gate_options = {"skip_human": self.skip_human}
@@ -79,8 +90,8 @@ class BreakPipeline:
             )
         )
 
-    def _create_agent(self, name, prompt_file):
-        agent_type = "cursor"
+    def _create_agent(self, name, prompt_file, role):
+        agent_type = get_agent_type(role)
         session_id = self._agent_session_id(name, agent_type)
         agent = Agent(
             name,
@@ -97,6 +108,7 @@ class BreakPipeline:
                 new_session_id,
             ),
             status_provider=lambda: self._agent_status(name),
+            call_scope_provider=lambda: self._active_agent_requirements.get(name),
         )
         self.agents[name] = agent
         return agent
@@ -147,6 +159,11 @@ class BreakPipeline:
             return None
 
     def _set_agent_session(self, agent_name, prompt_file, agent_type, session_id):
+        if session_id is None:
+            self.execution_plan.clear_agent_session(
+                agent_name, requirement_id=self._agent_requirement_id(agent_name)
+            )
+            return
         try:
             self.execution_plan.set_agent_session(
                 agent_name,
@@ -171,10 +188,26 @@ class BreakPipeline:
         if batch_key not in self._active_item_agents:
             prefix = batch_key
             self._active_item_agents[batch_key] = {
-                "analyst": self._create_agent(f"{prefix} 小需求需求分析", "item_requirements_analyst.md"),
-                "requirements_reviewer": self._create_agent(f"{prefix} 小需求需求评审", "item_requirements_reviewer.md"),
-                "developer": self._create_agent(f"{prefix} 小需求开发", "item_developer.md"),
-                "code_reviewer": self._create_agent(f"{prefix} 小需求验证审查", "item_code_reviewer.md"),
+                "analyst": self._create_agent(
+                    f"{prefix} 小需求需求分析",
+                    "item_requirements_analyst.md",
+                    "requirements_analyst",
+                ),
+                "requirements_reviewer": self._create_agent(
+                    f"{prefix} 小需求需求评审",
+                    "item_requirements_reviewer.md",
+                    "requirements_reviewer",
+                ),
+                "developer": self._create_agent(
+                    f"{prefix} 小需求开发",
+                    "item_developer.md",
+                    "developer",
+                ),
+                "code_reviewer": self._create_agent(
+                    f"{prefix} 小需求验证审查",
+                    "item_code_reviewer.md",
+                    "code_reviewer",
+                ),
             }
         return self._active_item_agents[batch_key]
 
@@ -207,28 +240,134 @@ class BreakPipeline:
             f"— 当前阶段: {item.status}"
         )
 
+    @staticmethod
+    def _current_timestamp():
+        return datetime.now().astimezone().isoformat(timespec="seconds")
+
+    @staticmethod
+    def _format_duration(started_at, completed_at):
+        total_seconds = max(
+            0,
+            int((datetime.fromisoformat(completed_at) - datetime.fromisoformat(started_at)).total_seconds()),
+        )
+        days, remainder = divmod(total_seconds, 86400)
+        hours, remainder = divmod(remainder, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        prefix = f"{days}天 " if days else ""
+        return f"{prefix}{hours:02d}小时 {minutes:02d}分 {seconds:02d}秒"
+
+    def _start_item(self, item):
+        if item.requirement_id in self._logged_item_starts:
+            return
+        started_at = self.execution_plan.set_item_started(
+            item.requirement_id,
+            self._current_timestamp(),
+        )
+        self._logged_item_starts.add(item.requirement_id)
+        separator = "=" * 60
+        print(
+            f"\n{separator}\n"
+            f"🚀 【小需求开始】{item.requirement_id} {item.name}"
+            f"（拆分顺序 {item.order}，实际执行序号 {item.execution_sequence}）\n"
+            f"开始时间: {started_at}\n"
+            f"{separator}"
+        )
+
+    def _complete_item(self, item):
+        if item.requirement_id in self._logged_item_completions:
+            return
+        started_at, completed_at = self.execution_plan.complete_item(
+            item.requirement_id,
+            self._current_timestamp(),
+            VALID_STATUSES,
+        )
+        self._logged_item_completions.add(item.requirement_id)
+        separator = "=" * 60
+        print(
+            f"\n{separator}\n"
+            f"✅ 【小需求结束】{item.requirement_id} {item.name}"
+            f"（拆分顺序 {item.order}，实际执行序号 {item.execution_sequence}）\n"
+            f"开始时间: {started_at}\n"
+            f"完成时间: {completed_at}\n"
+            f"耗时: {self._format_duration(started_at, completed_at)}\n"
+            f"{separator}"
+        )
+
     def run(self, user_idea=None):
+        if os.path.isfile(self.execution_plan_file):
+            demand = self.execution_plan.read().get('demand', {})
+            if demand.get('status') == REVIEW_EXHAUSTED:
+                print('⚠️ 拆分评审未通过且已达上限；保持暂停，不使用旧批准进入开发。')
+                return False
         if user_idea is not None:
-            self._run_breakdown(user_idea)
+            if self._run_breakdown(user_idea) is False:
+                return False
         elif not os.path.isfile(self.breakdown_approval_file):
-            self._run_breakdown()
+            if self._run_breakdown() is False:
+                return False
         if self._run_execution():
             if self._active_requirements_complete():
                 self._set_demand_status("记忆整理中")
             self._run_final_reflection()
             if self._active_requirements_complete():
+                self._validate_requirement_summary()
                 self._set_demand_status("已完成")
                 self._archive_completed_requirements()
             print("\n🎉🎉🎉 【拆分流水线圆满完成】所有小需求均已通过！")
+            return True
+        return False
+
+    def _normalize_item_response(self, item, stage, response):
+        details = external_blocker(response)
+        if details is None:
+            return response
+        self.execution_plan.record_continuation(item.requirement_id, stage, response, details)
+        print(f"⚠️ {item.requirement_id} 返回旧 blocked；记录缺口，按降级策略继续，不挂起。")
+        return 'FINAL_ANSWER ' + json.dumps(dict(
+            status='changes_requested', approval_token='',
+            summary='小需求不能 blocked，请按降级策略完成可控实现/验证并记录剩余缺口。原反馈已保存到 continuation_notes。'),
+            ensure_ascii=False)
+
+    def _continuation_context(self, item):
+        records = self.execution_plan.read().get('items', [])
+        selected = [record for record in records if record['id'] in {item.requirement_id, *item.dependencies}]
+        context = []
+        for record in selected:
+            details = {key: record[key] for key in ('review_outcomes', 'continuation_notes', 'suspension_history', 'suspension')
+                       if record.get(key)}
+            if details:
+                context.append(dict(id=record['id'], status=record['status'], details=details))
+        if not context:
+            return ''
+        return ('\n当前项/上游未决事实（调度放行不等于验收通过）：' + self._handoff('continuation-context', json.dumps(context, ensure_ascii=False))
+                + '\n检查上游已有代码、接口和报告，按已有降级策略与可替换边界推进；不得盲目信任上游已通过或伪造真实结果。')
+
+    def _exhaust_stage(self, requirement_id, stage, response='已达到累计 10 次上限'):
+        key = {'拆分评审中': 'breakdown_review', '需求评审中': 'requirements_review', '代码评审中': 'code_review'}[stage]
+        history = self.execution_plan._agent_session_target(self.execution_plan.read(), requirement_id).get('attempt_history', {}).get(key, [])
+        if history:
+            counts = {}
+            for entry in history:
+                counts[entry['kind']] = counts.get(entry['kind'], 0) + 1
+            response = json.dumps(dict(counts=counts, last_attempt=history[-1]), ensure_ascii=False)
+        if requirement_id is None:
+            self.execution_plan.suspend(None, REVIEW_EXHAUSTED, stage,
+                                        dict(reason='达到 10 次上限，仍未通过', last_feedback=str(response)))
+            print('⚠️ 大需求拆分未通过：暂停拆分，不批准进入开发。')
+            return
+        self.execution_plan.record_review_limit(requirement_id, stage, response)
+        print(f"⚠️ {requirement_id} {stage}达到上限：记录未通过，继续下一阶段/需求，不伪造批准。")
 
     @staticmethod
-    def _breakdown_resource_blocker(response):
+    def _breakdown_resource_blocker(response, work_dir=None):
         if not isinstance(response, str):
             return None
         decision = structured_final_answer_decision(response, {"blocked"})
         if decision is None:
             return None
         blocker = decision.get("blocker")
+        if blocker is None and work_dir:
+            blocker = read_resource_blocker(decision, work_dir)
         if not isinstance(blocker, dict):
             return None
         if blocker.get("kind") not in {"file_unreadable", "material_permission_denied"}:
@@ -241,7 +380,7 @@ class BreakPipeline:
         return {**blocker, "summary": decision.get("summary")}
 
     def _resolve_breakdown_resource_blocker(self, breaker, response):
-        while blocker := self._breakdown_resource_blocker(response):
+        while blocker := self._breakdown_resource_blocker(response, self.work_dir):
             summary = blocker.get("summary") or blocker.get("reason") or "拆分所需资源不可访问"
             print(
                 "⚠️ 拆分资源访问阻塞："
@@ -263,11 +402,9 @@ class BreakPipeline:
                     skip_human=False,
                     feedback_target=breaker.display_name,
                 )
-            response = breaker.send_message(
-                f"用户已处理资源访问阻塞：{feedback}\n"
+            response = self._send_task(breaker, f"用户已处理资源访问阻塞：{self._handoff('feedback', feedback)}\n"
                 "请重新读取所需文件或物料并更新拆分产物；若仍无法读取文件或因权限无法获取物料，"
-                "请继续按资源访问阻塞协议报告。"
-            )
+                "请继续按资源访问阻塞协议报告。", 'breakdown')
         return response
 
     def _run_breakdown(self, user_idea=None):
@@ -277,6 +414,8 @@ class BreakPipeline:
         initial_breakdown_message = None
         if resume_existing_index:
             user_idea = "已有拆分产物；请在不重置已写内容的前提下完成恢复审查。"
+            if self._pending_receipt('breakdown', None):
+                initial_breakdown_message = '恢复拆分阶段待补正的回执。'
         elif user_idea is None:
             user_idea = input("\n🎯 请输入总体开发需求描述:\n> ")
         if has_existing_index:
@@ -286,24 +425,40 @@ class BreakPipeline:
         else:
             self._set_demand_status("拆分中", source=user_idea)
             initial_breakdown_message = self._breakdown_instruction(user_idea)
-        breaker = self._create_agent("需求拆分", "requirement_breaker.md")
-        reviewer = self._create_agent("拆分评审", "requirement_break_reviewer.md")
+        breaker = self._create_agent(
+            "需求拆分",
+            "requirement_breaker.md",
+            "requirement_breaker",
+        )
+        reviewer = self._create_agent(
+            "拆分评审",
+            "requirement_break_reviewer.md",
+            "breakdown_reviewer",
+        )
         if initial_breakdown_message:
-            response = breaker.send_message(initial_breakdown_message)
+            response = self._send_task(breaker, initial_breakdown_message, 'breakdown')
             self._resolve_breakdown_resource_blocker(breaker, response)
         while True:
             self._set_demand_status("拆分评审中", source=user_idea)
-            for attempt in range(1, MAX_REQUIREMENT_REVIEW_ATTEMPTS + 1):
-                review = reviewer.send_message(
-                    f"请审查拆分产物 {self.requirements_index_file} 及目录 {self.requirements_dir}，原始需求：{user_idea}。"
-                    f"通过时在 FINAL_ANSWER JSON 中输出 status=approved 且 approval_token={BREAKDOWN_APPROVAL}；否则输出 changes_requested 和可执行修改意见。"
-                )
-                if self._review_passed(review, BREAKDOWN_APPROVAL):
+            for _attempt in range(MAX_STAGE_ATTEMPTS):
+                if self.execution_plan.get_stage_attempt("breakdown_review") >= MAX_STAGE_ATTEMPTS:
+                    self._exhaust_stage(None, '拆分评审中')
+                    return False
+                attempt = self.execution_plan.increment_stage_attempt("breakdown_review")
+                review = self._send_task(reviewer, f"请审查拆分产物 {self.requirements_index_file} 及目录 {self.requirements_dir}，原始需求：{self._handoff('user_idea', user_idea)}。"
+                    f"通过时在 FINAL_ANSWER JSON 中输出 status=approved；否则输出 changes_requested 和可执行修改意见。"
+                    f"本阶段最多评审 {MAX_STAGE_ATTEMPTS} 次；达到上限仍未通过则暂停，不批准拆分。", 'breakdown_review')
+                if review.startswith(CALL_FAILURE):
+                    if attempt >= MAX_STAGE_ATTEMPTS:
+                        self._exhaust_stage(None, '拆分评审中', review)
+                        return False
+                    continue
+                if self._review_passed(review):
                     break
-                if attempt >= MAX_REQUIREMENT_REVIEW_ATTEMPTS:
-                    print("⚠️ 拆分评审连续 3 次未通过，按策略自动进入人工确认，让后续流程先完成可完成内容。")
-                    break
-                response = breaker.send_message(f"拆分评审意见：{review}\n请更新 {self.requirements_dir}，仅修改拆分产物。")
+                if attempt >= MAX_STAGE_ATTEMPTS:
+                    self._exhaust_stage(None, '拆分评审中', review)
+                    return False
+                response = self._send_task(breaker, f"拆分评审意见：{self._handoff('review', review)}\n请更新 {self.requirements_dir}，仅修改拆分产物。", 'breakdown')
                 self._resolve_breakdown_resource_blocker(breaker, response)
             feedback = self._human_gate("1. 大需求拆分", self.requirements_index_file, breaker)
             if feedback is None:
@@ -312,7 +467,7 @@ class BreakPipeline:
                     approval_file.write("approved\n")
                 self._set_demand_status("开发中", source=user_idea)
                 return
-            response = breaker.send_message(f"人工审核意见：{feedback}\n请更新 {self.requirements_dir}，然后等待重新评审。")
+            response = self._send_task(breaker, f"人工审核意见：{self._handoff('feedback', feedback)}\n请更新 {self.requirements_dir}，然后等待重新评审。", 'breakdown')
             self._resolve_breakdown_resource_blocker(breaker, response)
 
     def _breakdown_instruction(self, user_idea):
@@ -323,12 +478,12 @@ class BreakPipeline:
             "每个小需求的 `user_requirements.md` 都必须包含“全局上下文”小节，"
             "传递客户原始需求摘要、适用业务场景、测试环境、账号、密码、凭据、接口地址、物料/Figma 等跨需求信息；"
             "测试环境、账号、密码等验证信息必须从原始需求保留到需要联调或验证的小需求中，不得只放在父需求或索引里。"
-            f"返回前确认文件存在。原始需求：{user_idea}"
+            f"返回前确认文件存在。原始需求：{self._handoff('user_idea', user_idea)}"
         )
 
     def _breakdown_update_instruction(self, user_idea):
         return (
-            f"收到新的需求或补充说明：{user_idea}。"
+            f"收到新的需求或补充说明：{self._handoff('user_idea', user_idea)}。"
             f"请阅读并保留现有拆分产物 {self.requirements_index_file} 及 {self.requirements_dir} 下各需求文件，"
             f"只做与本次输入相关的增量调整；必要时新增、拆分或更新小需求，并保持依赖顺序、状态、范围、验收标准和风险一致。"
             "若补充说明包含客户原始需求、测试环境、账号、密码、凭据、接口地址、物料/Figma 等跨需求信息，"
@@ -338,12 +493,15 @@ class BreakPipeline:
 
     def _run_execution(self):
         print("\n" + "=" * 60 + "\n💻 阶段 2: 按小需求实施\n" + "=" * 60)
+        self._logged_item_starts = set()
+        self._logged_item_completions = set()
         self._ensure_execution_plan()
         self._set_demand_status("开发中")
         items = self._load_items()
         self._validate_items(items)
         while item := self._next_runnable_item(items):
             self._ensure_item_execution_sequence(item)
+            self._start_item(item)
             item_agents = self._item_agents(item)
             self._bind_item_agents(item, item_agents)
             self._log_current_item(item)
@@ -371,7 +529,7 @@ class BreakPipeline:
                         release_agents=self._should_release_item_agents(item, items),
                     )
                 else:
-                    self._set_status(item.requirement_id, "已完成")
+                    self._complete_item(item)
                 items = self._load_items()
                 self._validate_items(items)
                 continue
@@ -387,22 +545,31 @@ class BreakPipeline:
                 completed_item.status == "记忆整理中"
                 and not self._should_save_item_memory(completed_item, items)
             ):
-                self._set_status(completed_item.requirement_id, "已完成")
+                self._complete_item(completed_item)
                 items = self._load_items()
                 self._validate_items(items)
         unfinished = [item for item in items if item.status not in {"已完成"}]
+        outcomes = [record for record in self.execution_plan.read()['items'] if record.get('review_outcomes')]
+        if all(item.status in {'已完成', REVIEW_EXHAUSTED} for item in items) and (unfinished or outcomes):
+            self._set_demand_status('执行结束（有未通过项）')
+            print('\n⚠️ 所有小需求执行回合已结束，但存在未通过项；未归档，不宣称全部验收完成。')
+            for record in self.execution_plan.read()['items']:
+                if record.get('review_outcomes') or record['status'] == REVIEW_EXHAUSTED:
+                    print(f"- {record['id']}：{json.dumps(record.get('review_outcomes') or record.get('suspension'), ensure_ascii=False)}")
+            return False
         if unfinished:
-            self._mark_blocked_items(items)
-            items = self._load_items()
-            unfinished = [item for item in items if item.status not in {"已完成"}]
             deferred_ids = self._blocked_dependency_chain(items)
             if {item.requirement_id for item in unfinished} <= deferred_ids:
+                self._set_demand_status('阻塞')
                 self._print_deferred_summary(items, deferred_ids)
                 return False
             raise RuntimeError("没有可执行的小需求；请检查 requirements/index.md 中的阻塞状态和依赖。")
         return True
 
     def _run_item_requirements(self, item, analyst, reviewer):
+        if self.execution_plan.get_stage_attempt('requirements_review', item.requirement_id) >= MAX_STAGE_ATTEMPTS:
+            self._exhaust_stage(item.requirement_id, '需求评审中')
+            return
         paths = self._item_paths(item)
         os.makedirs(paths["workspace"], exist_ok=True)
         requirement_file = paths["requirements"]
@@ -415,23 +582,36 @@ class BreakPipeline:
             )
             feedback = self._pending_feedback_message(item.requirement_id)
             if feedback:
-                analysis_message += f"\n需要处理的需求变更意见：{feedback}"
-            analyst.send_message(analysis_message)
+                analysis_message += f"\n需要处理的需求变更意见：{self._handoff('feedback', feedback)}"
+            response = self._send_task(analyst, analysis_message + self._continuation_context(item) + STAGE_RESULT_INSTRUCTION, 'analysis', item)
+            response = self._normalize_item_response(item, '需求分析中', response)
             self._clear_pending_feedback(item.requirement_id)
             self._set_status(item.requirement_id, "需求评审中")
         while True:
-            for attempt in range(1, MAX_REQUIREMENT_REVIEW_ATTEMPTS + 1):
-                review = reviewer.send_message(
-                    f"只评审当前需求 {item.requirement_id}。阅读 {requirement_file} 和 {analysis_report}，将结论写入 {review_report}。通过时在 FINAL_ANSWER JSON 中输出 status=approved 且 approval_token={REQUIREMENTS_APPROVAL}；否则输出 changes_requested 和具体修改意见。"
+            for _attempt in range(MAX_STAGE_ATTEMPTS):
+                if self.execution_plan.get_stage_attempt("requirements_review", item.requirement_id) >= MAX_STAGE_ATTEMPTS:
+                    self._exhaust_stage(item.requirement_id, '需求评审中')
+                    return
+                attempt = self.execution_plan.increment_stage_attempt(
+                    "requirements_review", item.requirement_id
                 )
-                if self._review_passed(review, REQUIREMENTS_APPROVAL):
+                review = self._send_task(reviewer, f"只评审当前需求 {item.requirement_id}。阅读 {requirement_file} 和 {analysis_report}，将结论写入 {review_report}。通过时在 FINAL_ANSWER JSON 中输出 status=approved；否则输出 changes_requested 和具体修改意见。"
+                    + self._continuation_context(item) + STAGE_RESULT_INSTRUCTION, 'requirements_review', item)
+                if review.startswith(CALL_FAILURE):
+                    if attempt >= MAX_STAGE_ATTEMPTS:
+                        self._exhaust_stage(item.requirement_id, '需求评审中', review)
+                        return
+                    continue
+                review = self._normalize_item_response(item, '需求评审中', review)
+                if self._review_passed(review):
                     break
-                if attempt >= MAX_REQUIREMENT_REVIEW_ATTEMPTS:
-                    print(f"⚠️ 小需求 {item.requirement_id} 需求评审连续 3 次未通过，按策略自动进入人工确认。")
-                    break
+                if attempt >= MAX_STAGE_ATTEMPTS:
+                    self._exhaust_stage(item.requirement_id, '需求评审中', review)
+                    return
                 self._set_pending_feedback(item.requirement_id, "requirement_review", "需求评审中", review)
                 self._set_status(item.requirement_id, "需求分析中")
-                analyst.send_message(f"当前需求 {item.requirement_id} 的需求评审意见：{review}\n请仅修订当前需求文档。")
+                response = self._send_task(analyst, f"当前需求 {item.requirement_id} 的需求评审意见：{self._handoff('review', review)}\n请仅修订当前需求文档。" + self._continuation_context(item) + STAGE_RESULT_INSTRUCTION, 'analysis', item)
+                response = self._normalize_item_response(item, '需求分析中', response)
                 self._clear_pending_feedback(item.requirement_id)
                 self._set_status(item.requirement_id, "需求评审中")
             self._set_status(item.requirement_id, "待需求人工确认")
@@ -445,7 +625,8 @@ class BreakPipeline:
                 return
             self._set_pending_feedback(item.requirement_id, "requirements_human", "待需求人工确认", feedback)
             self._set_status(item.requirement_id, "需求分析中")
-            analyst.send_message(f"当前需求 {item.requirement_id} 的需求人工审核意见：{feedback}\n请仅修订 {analysis_report}。")
+            response = self._send_task(analyst, f"当前需求 {item.requirement_id} 的需求人工审核意见：{self._handoff('feedback', feedback)}\n请仅修订 {analysis_report}。" + self._continuation_context(item) + STAGE_RESULT_INSTRUCTION, 'analysis', item)
+            response = self._normalize_item_response(item, '需求分析中', response)
             self._clear_pending_feedback(item.requirement_id)
             self._set_status(item.requirement_id, "需求评审中")
 
@@ -462,6 +643,9 @@ class BreakPipeline:
         self._set_status(item.requirement_id, "需求分析中")
 
     def _run_item(self, item, developer, reviewer):
+        if self.execution_plan.get_stage_attempt('code_review', item.requirement_id) >= MAX_STAGE_ATTEMPTS:
+            self._exhaust_stage(item.requirement_id, '代码评审中')
+            return
         paths = self._item_paths(item)
         os.makedirs(paths["workspace"], exist_ok=True)
         requirement_file = paths["requirements"]
@@ -469,6 +653,13 @@ class BreakPipeline:
         develop_report = paths["develop"]
         test_report = paths["test"]
         review_report = paths["code_review"]
+        review_context = CodeReviewContext(
+            item.requirement_id, paths,
+            self.execution_plan.get_stage_attempt('code_review', item.requirement_id),
+        )
+        pending_feedback = self._pending_feedback_message(item.requirement_id)
+        if pending_feedback:
+            review_context.record_feedback(pending_feedback)
         # 静态扫描不再由流水线强制插入；由拆分阶段编排的「静态扫描」小需求
         # 在开发回合内由开发 Agent 自行调用 static_scan.py 完成。
         if item.status != "代码评审中":
@@ -480,24 +671,44 @@ class BreakPipeline:
             )
             feedback = self._pending_feedback_message(item.requirement_id)
             if feedback:
-                initial_message += f"\n上次反馈意见：{feedback}\n请仅修正当前项。"
-            developer.send_message(initial_message)
+                initial_message += f"\n上次反馈意见：{self._handoff('feedback', feedback)}\n请仅修正当前项。"
+            response = self._send_task(developer, initial_message + DEVELOPMENT_HANDOFF + self._continuation_context(item) + STAGE_RESULT_INSTRUCTION, 'development', item)
+            response = self._normalize_item_response(item, '开发中', response)
+            review_context.record_development(response)
             self._clear_pending_feedback(item.requirement_id)
             self._set_status(item.requirement_id, "代码评审中")
         while True:
-            review = reviewer.send_message(
-                f"只验证并审查当前需求 {item.requirement_id}。阅读 {requirement_file}、{analysis_report}、{develop_report}、当前代码和测试。"
-                f"执行必要测试并写 {test_report}；发现缺陷时写 {paths['bug']}。"
-                f"将审查结论写入 {review_report}。通过时在 FINAL_ANSWER JSON 中输出 status=approved 且 approval_token={ITEM_APPROVAL}；否则输出 changes_requested 和当前项的具体修改意见。"
-            )
-            if self._is_requirement_change(review):
+            if self.execution_plan.get_stage_attempt("code_review", item.requirement_id) >= MAX_STAGE_ATTEMPTS:
+                self._exhaust_stage(item.requirement_id, '代码评审中')
+                return
+            else:
+                attempt = self.execution_plan.increment_stage_attempt("code_review", item.requirement_id)
+                review = self._send_task(reviewer, f"只验证并审查当前需求 {item.requirement_id}。按本轮调度模式核对 {requirement_file}、{analysis_report}、{develop_report} 和相关代码、测试。"
+                    f"在本轮范围内执行必要测试并写 {test_report}；发现缺陷时写 {paths['bug']}。"
+                    f"将审查结论写入 {review_report}。通过时在 FINAL_ANSWER JSON 中输出 status=approved；否则输出 changes_requested 和当前项的具体修改意见。"
+                    "若目标为 android:runnable，核对 Developer 的实际设备验证、AVD 准备尝试、硬超时及启停清理证据；缺口交回 Developer 补验，不能只因 adb 列表为空判不可用。"
+                    + review_context.render()
+                    + self._continuation_context(item) + STAGE_RESULT_INSTRUCTION, 'code_review', item)
+            if review.startswith(CALL_FAILURE):
+                if attempt >= MAX_STAGE_ATTEMPTS:
+                    self._exhaust_stage(item.requirement_id, '代码评审中', review)
+                    return
+                continue
+            review = self._normalize_item_response(item, '代码评审中', review)
+            review_context.record_review(review)
+            if self._is_requirement_change(review) and attempt < MAX_STAGE_ATTEMPTS:
                 self._set_pending_feedback(item.requirement_id, "requirement_change", "代码评审中", review)
                 self._set_status(item.requirement_id, "需求分析中")
                 return
-            if not self._review_passed(review, ITEM_APPROVAL):
+            if attempt >= MAX_STAGE_ATTEMPTS and not self._review_passed(review):
+                self._exhaust_stage(item.requirement_id, '代码评审中', review)
+                return
+            if not self._review_passed(review):
                 self._set_pending_feedback(item.requirement_id, "code_review", "代码评审中", review)
                 self._set_status(item.requirement_id, "开发中")
-                developer.send_message(f"当前需求 {item.requirement_id} 的代码审查意见：{review}\n请仅修正当前项。")
+                response = self._send_task(developer, f"当前需求 {item.requirement_id} 的代码审查意见：{self._handoff('review', review)}\n请仅修正当前项。" + DEVELOPMENT_HANDOFF + self._continuation_context(item) + STAGE_RESULT_INSTRUCTION, 'development', item)
+                response = self._normalize_item_response(item, '开发中', response)
+                review_context.record_development(response)
                 self._clear_pending_feedback(item.requirement_id)
                 self._set_status(item.requirement_id, "代码评审中")
                 continue
@@ -511,8 +722,11 @@ class BreakPipeline:
                 self._set_status(item.requirement_id, "需求分析中")
                 return
             self._set_pending_feedback(item.requirement_id, "human", "待人工确认", feedback)
+            review_context.record_feedback(feedback)
             self._set_status(item.requirement_id, "开发中")
-            developer.send_message(f"当前需求 {item.requirement_id} 的人工审核意见：{feedback}\n请仅修正当前项。")
+            response = self._send_task(developer, f"当前需求 {item.requirement_id} 的人工审核意见：{self._handoff('feedback', feedback)}\n请仅修正当前项。" + DEVELOPMENT_HANDOFF + self._continuation_context(item) + STAGE_RESULT_INSTRUCTION, 'development', item)
+            response = self._normalize_item_response(item, '开发中', response)
+            review_context.record_development(response)
             self._clear_pending_feedback(item.requirement_id)
             self._set_status(item.requirement_id, "代码评审中")
 
@@ -630,8 +844,8 @@ class BreakPipeline:
             ),
         }
         for role, message in curation_messages.items():
-            item_agents[role].send_message(message)
-        self._set_status(item.requirement_id, "已完成")
+            self._send_task(item_agents[role], message, 'memory_analysis' if role == 'analyst' else 'memory_development', item)
+        self._complete_item(item)
         if release_agents:
             self._release_item_agents(self._item_agent_batch_key(item))
 
@@ -645,8 +859,8 @@ class BreakPipeline:
         return feedback.strip().startswith("需求变更:")
 
     @staticmethod
-    def _review_passed(review_response, approval_token):
-        return review_passed(review_response, approval_token)
+    def _review_passed(review_response):
+        return review_passed(review_response)
 
     def _item_paths(self, item):
         requirements_file = os.path.abspath(os.path.join(self.requirements_dir, item.filename))
@@ -666,6 +880,9 @@ class BreakPipeline:
 
     def _load_items(self):
         self._ensure_execution_plan()
+        migrated = self.execution_plan.migrate_item_stops()
+        if migrated:
+            print(f"ℹ️ 迁移旧小需求挂起状态：{', '.join(migrated)}；保留证据与累计次数，继续执行。")
         plan = self.execution_plan.read()
         statuses_changed = self.execution_plan.normalize_plan(plan, VALID_STATUSES)
         self.execution_plan.validate(plan, VALID_STATUSES, self.execution_plan.index_hash())
@@ -712,17 +929,23 @@ class BreakPipeline:
         raise ValueError(f"找不到需求 ID: {item.requirement_id}")
 
     def _ensure_execution_plan(self):
-        if self.execution_plan.is_current(VALID_STATUSES):
+        if self.execution_plan.is_current(VALID_STATUSES) and not self._pending_receipt('normalize', None):
             self._validate_items_from_plan(self.execution_plan.read())
             return
         previous_plan = self._valid_previous_plan()
         source_hash = self.execution_plan.index_hash()
-        normalizer = self._create_agent("执行索引规范化", "index_normalizer.md")
-        normalizer_response = normalizer.send_message(
-            f"请将 {self.requirements_index_file} 规范化为 {self.execution_plan_file}。"
-            f"requirements 目录为 {self.requirements_dir}；当前 index.md 的 SHA-256 为 {source_hash}。"
-            "只写 execution_plan.json，不得修改 index.md 或任何需求、报告、源码文件。"
+        normalizer = self._create_agent(
+            "执行索引规范化",
+            "index_normalizer.md",
+            "requirement_breaker",
         )
+        normalizer_response = self._send_task(normalizer, f"请将 {self.requirements_index_file} 规范化为 {self.execution_plan_file}。"
+            f"requirements 目录为 {self.requirements_dir}；当前 index.md 的 SHA-256 为 {source_hash}。"
+            "只写 execution_plan.json，不得修改 index.md 或任何需求、报告、源码文件。", 'normalize')
+        if previous_plan is not None:
+            # This receipt was just recovered; do not resurrect it while
+            # preserving unrelated progress from before normalization.
+            previous_plan.get('demand', {}).get('pending_receipts', {}).pop('normalize', None)
         try:
             plan = self.execution_plan.read()
         except ValueError as error:
@@ -760,6 +983,10 @@ class BreakPipeline:
         changed = False
         previous_demand = previous_plan.get("demand", {})
         demand = plan.setdefault("demand", {})
+        for field in ('stage_attempts', 'attempt_history', 'pending_receipts', 'suspension', 'suspension_history', 'review_outcomes', 'continuation_notes'):
+            if field in previous_demand and demand.get(field) != previous_demand[field]:
+                demand[field] = previous_demand[field]
+                changed = True
         if previous_demand.get("status") and demand.get("status") != previous_demand.get("status"):
             demand["status"] = previous_demand.get("status")
             changed = True
@@ -795,6 +1022,13 @@ class BreakPipeline:
                 else:
                     item.pop("execution_sequence", None)
                 changed = True
+            for field in ("started_at", "completed_at", "stage_attempts", "attempt_history", "pending_receipts", "suspension", "suspension_history", "review_outcomes", "continuation_notes"):
+                if item.get(field) != previous_item.get(field):
+                    if field in previous_item:
+                        item[field] = previous_item[field]
+                    else:
+                        item.pop(field, None)
+                    changed = True
             if item.get("acceptance_ids") != previous_item.get("acceptance_ids"):
                 if "acceptance_ids" in previous_item:
                     item["acceptance_ids"] = previous_item.get("acceptance_ids")
@@ -879,7 +1113,7 @@ class BreakPipeline:
 
     @staticmethod
     def _next_runnable_item(items):
-        completed = {item.requirement_id for item in items if item.status == "已完成"}
+        completed = {item.requirement_id for item in items if item.status in {"已完成", REVIEW_EXHAUSTED}}
         for item in items:
             if item.status in {
                 "需求分析中",
@@ -894,25 +1128,10 @@ class BreakPipeline:
                 return item
         return None
 
-    def _mark_blocked_items(self, items):
-        completed = {item.requirement_id for item in items if item.status == "已完成"}
-        for item in items:
-            if item.status in {
-                "需求分析中",
-                "需求评审中",
-                "待需求人工确认",
-                "待开发",
-                "开发中",
-                "代码评审中",
-                "待人工确认",
-                "记忆整理中",
-            } and not set(item.dependencies) <= completed:
-                self._set_status(item.requirement_id, "阻塞")
-
     @staticmethod
     def _blocked_dependency_chain(items):
         """Return blocked items plus every unfinished item waiting on them."""
-        deferred_ids = {item.requirement_id for item in items if item.status == "阻塞"}
+        deferred_ids = {item.requirement_id for item in items if item.status in SUSPENDED_STATUSES | {'阻塞'}}
         changed = True
         while changed:
             changed = False
@@ -922,13 +1141,15 @@ class BreakPipeline:
                     changed = True
         return deferred_ids
 
-    @staticmethod
-    def _print_deferred_summary(items, deferred_ids):
-        blocked = [item for item in items if item.status == "阻塞"]
-        waiting = [item for item in items if item.status != "已完成" and item.requirement_id in deferred_ids and item.status != "阻塞"]
-        print("\n⚠️ 本期可执行需求已完成；以下需求因阻塞项延后，未执行最终记忆整理：")
+    def _print_deferred_summary(self, items, deferred_ids):
+        stopped = SUSPENDED_STATUSES | {'阻塞'}
+        blocked = [item for item in items if item.status in stopped]
+        waiting = [item for item in items if item.status != "已完成" and item.requirement_id in deferred_ids and item.status not in stopped]
+        records = {record['id']: record for record in self.execution_plan.read()['items']}
+        print("\n⚠️ 当前无可执行需求，仍有历史/人工阻塞项；不是全部验收完成，未执行最终记忆整理：")
         for item in blocked:
-            print(f"- {item.requirement_id} {item.name}：阻塞")
+            details = records[item.requirement_id].get('suspension', {})
+            print(f"- {item.requirement_id} {item.name}：{item.status}；{details.get('reason', '')}；恢复条件：{details.get('resume_condition', '需明确处理未通过项')}")
         for item in waiting:
             blockers = [dependency for dependency in item.dependencies if dependency in deferred_ids]
             print(f"- {item.requirement_id} {item.name}：等待 {', '.join(blockers)}")
@@ -978,6 +1199,32 @@ class BreakPipeline:
         os.rename(self.requirements_dir, archive_dir)
         return archive_dir
 
+    def _validate_requirement_summary(self):
+        if not os.path.isfile(self.requirement_summary_file):
+            raise ValueError(
+                f"需求总结未生成：缺少 {self.requirement_summary_file}。"
+            )
+        with open(self.requirement_summary_file, encoding="utf-8") as summary_file:
+            summary = summary_file.read()
+        required_sections = (
+            "## 需求实现情况",
+            "## 文档冲突与缺失",
+            "## Agent 自主决策",
+            "## 来源与 UI 验证",
+            "## 未完成与风险",
+        )
+        missing_sections = [section for section in required_sections if section not in summary]
+        if missing_sections:
+            raise ValueError(
+                f"需求总结不完整：缺少章节 {', '.join(missing_sections)}。"
+            )
+        item_ids = [item.requirement_id for item in self._load_items()]
+        missing_items = [requirement_id for requirement_id in item_ids if requirement_id not in summary]
+        if missing_items:
+            raise ValueError(
+                f"需求总结不完整：缺少需求 {', '.join(missing_items)}。"
+            )
+
     def _next_requirements_archive_dir(self):
         index = 1
         while True:
@@ -989,23 +1236,26 @@ class BreakPipeline:
     def _run_final_reflection(self):
         breaker = self.agents.get("需求拆分")
         if breaker is None:
-            breaker = self._create_agent("需求拆分", "requirement_breaker.md")
-        items = self._load_items()
-        memory_reports = [
-            memory_report
-            for item in items
-            if os.path.isfile(memory_report := self._item_paths(item)["memory_report"])
-        ]
-        breaker.send_message(
-            self._render_break_prompt(
-                MEMORY_CURATION_PROMPT,
-                opening="所有小需求已完成。请只进行拆分层面的最终记忆整理。",
-                read_instruction=(
-                    f"请读取 {self.requirements_index_file}、{self.execution_plan_file}、"
-                    f"各项记忆报告 {memory_reports}、当前源码和项目 memory/。"
-                ),
-                curation_scope="只沉淀跨需求可复用的拆分、依赖和整体架构结论。",
-                execution_plan_file=self.execution_plan_file,
-                closing_instruction="不要重复各项已沉淀的实现细节，不得修改需求、报告、执行计划或源码。",
+            breaker = self._create_agent(
+                "需求拆分",
+                "requirement_breaker.md",
+                "requirement_breaker",
             )
-        )
+        self._send_task(breaker, self._render_break_prompt(
+                REQUIREMENT_SUMMARY_PROMPT,
+                opening="所有小需求已完成，收到最终记忆整理命令，请进入需求总结模式。",
+                read_instruction=(
+                    f"请扫描整个 {self.requirements_dir}/，包括 index.md、shared_context.md、"
+                    f"{self.execution_plan_file}、所有小需求工作日志、Agent 会话证据和当前源码。"
+                ),
+                curation_scope=(
+                    f"请重建并校验 {self.requirement_summary_file}，"
+                    "完整总结每个需求、每条 AC、文档冲突、文档缺失、Agent 自主决策、"
+                    "实现证据和未验证范围。"
+                ),
+                execution_plan_file=self.execution_plan_file,
+                closing_instruction=(
+                    "不得修改 memory/、memory_curation.md、需求文件、其他报告、源码或执行计划；"
+                    "完成后返回报告路径和扫描范围。"
+                ),
+            ), 'summary')

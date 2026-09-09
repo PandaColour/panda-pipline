@@ -44,6 +44,34 @@ class AgentSessionTests(unittest.TestCase):
             output.getvalue(),
         )
 
+    def test_agent_log_counts_calls_for_current_requirement(self):
+        current_requirement = ["R-001"]
+        with patch.object(Agent, "_load_system_prompt", return_value="system"):
+            agent = Agent(
+                "批次-001 小需求需求分析",
+                "prompt.md",
+                "/work/repo",
+                agent_type="cursor",
+                call_scope_provider=lambda: current_requirement[0],
+            )
+        agent.agent_impl = MagicMock()
+        agent.agent_impl.run.return_value = SimpleNamespace(
+            text="ok", session_id=None, returncode=0, error=None,
+        )
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            for requirement_id in ("R-001", "R-002", "R-003"):
+                current_requirement[0] = requirement_id
+                agent.send_message("analyze")
+            current_requirement[0] = "R-004"
+            agent.send_message("analyze")
+
+        self.assertIn(
+            "🤖 批次-001 小需求需求分析agent(cursor) — 需求 R-004 第 1 次调用（批次累计第 4 次）",
+            output.getvalue(),
+        )
+
     def test_saves_first_session_id_and_resumes_it_on_second_call(self):
         agent = self._agent_with_runner(
             SimpleNamespace(text="first", session_id="chat-1", returncode=0, error=None),

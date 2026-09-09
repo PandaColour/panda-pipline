@@ -5,7 +5,27 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from break_pipeline import BreakPipeline
+from break_pipeline import BreakPipeline, VALID_STATUSES
+from execution_plan import ExecutionPlanStore
+from pipeline import VALID_STATUSES as NORMAL_VALID_STATUSES
+
+
+class StatusNormalizationTests(unittest.TestCase):
+    def test_static_scan_normalization_respects_workflow(self):
+        for statuses, expected in ((NORMAL_VALID_STATUSES, '静态扫描中'),
+                                   (VALID_STATUSES, '开发中'), (None, '静态扫描中')):
+            with self.subTest(statuses=statuses):
+                self.assertEqual(ExecutionPlanStore.normalize_status('静态扫描中', statuses), expected)
+
+    def test_session_persistence_does_not_change_normal_workflow_stage(self):
+        from pipeline import Pipeline
+        with tempfile.TemporaryDirectory() as work_dir:
+            pipeline = Pipeline(work_dir)
+            pipeline._ensure_execution_plan('test')
+            pipeline._set_status('静态扫描中')
+            pipeline.execution_plan.set_agent_session(
+                '代码开发', session_id='test-session', prompt_file='code_developer.md', agent_type='codex')
+            self.assertEqual(pipeline.execution_plan.read()['items'][0]['status'], '静态扫描中')
 
 
 class BreakExecutionPlanTests(unittest.TestCase):
@@ -119,6 +139,47 @@ class BreakExecutionPlanTests(unittest.TestCase):
         saved_plan = json.loads(Path(self.pipeline.execution_plan_file).read_text(encoding="utf-8"))
         self.assertIsNone(saved_plan["items"][0]["pending_feedback"])
 
+    def test_item_start_time_is_persisted_once(self):
+        self._write_plan(self._demand_plan())
+
+        first = self.pipeline.execution_plan.set_item_started(
+            "R-001", "2026-08-28T09:00:00+08:00"
+        )
+        second = self.pipeline.execution_plan.set_item_started(
+            "R-001", "2026-08-28T10:00:00+08:00"
+        )
+
+        saved = json.loads(Path(self.pipeline.execution_plan_file).read_text(encoding="utf-8"))
+        self.assertEqual(first, "2026-08-28T09:00:00+08:00")
+        self.assertEqual(second, first)
+        self.assertEqual(saved["items"][0]["started_at"], first)
+
+    def test_item_completion_persists_status_and_time_in_one_write(self):
+        plan = self._demand_plan(status="记忆整理中")
+        plan["items"][0]["started_at"] = "2026-08-28T09:00:00+08:00"
+        self._write_plan(plan)
+
+        with patch.object(
+            self.pipeline.execution_plan,
+            "write",
+            wraps=self.pipeline.execution_plan.write,
+        ) as write:
+            timestamps = self.pipeline.execution_plan.complete_item(
+                "R-001",
+                "2026-08-28T10:02:03+08:00",
+                VALID_STATUSES,
+                self.pipeline.execution_plan.index_hash(),
+            )
+
+        saved = json.loads(Path(self.pipeline.execution_plan_file).read_text(encoding="utf-8"))
+        self.assertEqual(timestamps, (
+            "2026-08-28T09:00:00+08:00",
+            "2026-08-28T10:02:03+08:00",
+        ))
+        self.assertEqual(write.call_count, 1)
+        self.assertEqual(saved["items"][0]["status"], "已完成")
+        self.assertEqual(saved["items"][0]["completed_at"], timestamps[1])
+
     def test_load_items_normalizes_blocking_synonym_status(self):
         self._write_plan(self._plan(status="阻断（待外部契约）"))
 
@@ -150,7 +211,11 @@ class BreakExecutionPlanTests(unittest.TestCase):
         with patch.object(self.pipeline, "_create_agent", return_value=normalizer) as create_agent:
             self.pipeline._ensure_execution_plan()
 
-        create_agent.assert_called_once_with("执行索引规范化", "index_normalizer.md")
+        create_agent.assert_called_once_with(
+            "执行索引规范化",
+            "index_normalizer.md",
+            "requirement_breaker",
+        )
         self.assertIn(str(self.index_file), normalizer.send_message.call_args.args[0])
         self.assertEqual(self.pipeline._load_items()[0].requirement_id, "R-001")
 
@@ -306,6 +371,34 @@ class BreakExecutionPlanTests(unittest.TestCase):
             items = self.pipeline._load_items()
 
         self.assertEqual(items[0].execution_sequence, 3)
+
+    def test_item_lifecycle_timestamp_requires_timezone(self):
+        plan = self._demand_plan()
+        plan["items"][0]["started_at"] = "2026-08-28T09:00:00"
+        self._write_plan(plan)
+
+        with self.assertRaisesRegex(ValueError, "started_at"):
+            self.pipeline._load_items()
+
+    def test_renormalization_preserves_item_lifecycle_timestamps(self):
+        previous = self._demand_plan(status="已完成")
+        previous["items"][0].update({
+            "started_at": "2026-08-28T09:00:00+08:00",
+            "completed_at": "2026-08-28T10:00:00+08:00",
+        })
+        self._write_plan(previous)
+        self.index_file.write_text("# 仅修改说明文字\n", encoding="utf-8")
+        normalizer = MagicMock()
+        normalizer.send_message.side_effect = lambda _message: self._write_plan(
+            self._demand_plan(status="待开发")
+        )
+
+        with patch.object(self.pipeline, "_create_agent", return_value=normalizer):
+            self.pipeline._load_items()
+
+        saved = json.loads(Path(self.pipeline.execution_plan_file).read_text(encoding="utf-8"))
+        self.assertEqual(saved["items"][0]["started_at"], previous["items"][0]["started_at"])
+        self.assertEqual(saved["items"][0]["completed_at"], previous["items"][0]["completed_at"])
 
     def test_load_items_rejects_duplicate_actual_execution_sequence(self):
         plan = self._plan()

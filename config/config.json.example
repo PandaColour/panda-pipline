@@ -1,0 +1,35 @@
+{
+  "PROJECT_ROOT": "/Users/panda.colour/Company/ios-m6",
+  "REPOS": [
+    {
+      "url": "https://gitee.com/pandacolour/aiphone.git",
+      "branch": "main"
+    }
+  ],
+  "AGENT_TYPES": [
+    {
+      "role": "requirement_breaker",
+      "agent_type": "cursor"
+    },
+    {
+      "role": "breakdown_reviewer",
+      "agent_type": "cursor"
+    },
+    {
+      "role": "requirements_analyst",
+      "agent_type": "cursor"
+    },
+    {
+      "role": "requirements_reviewer",
+      "agent_type": "cursor"
+    },
+    {
+      "role": "developer",
+      "agent_type": "cursor"
+    },
+    {
+      "role": "code_reviewer",
+      "agent_type": "cursor"
+    }
+  ]
+}

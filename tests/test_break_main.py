@@ -6,6 +6,22 @@ import main as normal_main
 
 
 class BreakMainTests(unittest.TestCase):
+    def test_receipt_pending_stops_both_entrypoints_without_crash_or_next_task(self):
+        from task_protocol import ReceiptPending
+        for module, pipeline_name in ((break_main, 'BreakPipeline'), (normal_main, 'Pipeline')):
+            for resume in (True, False):
+                with self.subTest(module=module.__name__, resume=resume), \
+                        patch.object(module, 'setup_environment', return_value='/tmp/target'), \
+                        patch.object(module.os.path, 'isfile', return_value=resume), \
+                        patch.object(module, pipeline_name) as pipeline, \
+                        patch('builtins.input', return_value='需求') as prompt, \
+                        patch('builtins.print') as printed:
+                    pipeline.return_value.run.side_effect = ReceiptPending('回执待补正：原始日志 example.txt')
+                    module.main()
+                    pipeline.return_value.run.assert_called_once()
+                    self.assertEqual(prompt.call_count, 0 if resume else 1)
+                    self.assertIn('example.txt', str(printed.call_args_list))
+
     @patch("break_main.BreakPipeline")
     @patch("break_main.setup_environment", return_value="/tmp/target")
     def test_main_starts_break_pipeline(self, setup_environment, pipeline_class):

@@ -6,6 +6,7 @@ import sys
 import time
 
 from ._result import AgentRunResult
+from ._retry import run_with_retry
 from ._cli import executable_name
 
 
@@ -87,15 +88,11 @@ def parse_stream(json_line, stream_state):
 
 class OpencodeAgent:
     def run(self, work_dir, message, system_prompt=None, session_id=None, add_dirs=None):
-        current_session_id = session_id
-        result = self._run_once(work_dir, message, system_prompt, current_session_id, add_dirs)
-        for _attempt in range(MAX_RETRIES):
-            current_session_id = result.session_id or current_session_id
-            if result.returncode == 0:
-                return result
-            time.sleep(RETRY_DELAY_SECONDS)
-            result = self._run_once(work_dir, message, system_prompt, current_session_id, add_dirs)
-        return result
+        return run_with_retry(
+            lambda current: self._run_once(work_dir, message, system_prompt, current, add_dirs),
+            session_id, retries=getattr(self, "max_retries", MAX_RETRIES), delay=RETRY_DELAY_SECONDS, sleep=time.sleep,
+            invalidate=getattr(self, "session_invalidation_callback", None),
+        )
 
     def _run_once(self, work_dir, message, system_prompt=None, session_id=None, add_dirs=None):
         try:

@@ -3,10 +3,38 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from agents import Agent
-from agents.cursor import CursorAgent
+from agents.cursor import CursorAgent, RETRY_DELAY_SECONDS
+from task_protocol import parse_final_answer
 
 
 class CursorAgentTests(unittest.TestCase):
+    def test_completed_receipt_survives_partial_stream_and_plain_result(self):
+        receipt = 'FINAL_ANSWER\n' + json.dumps(dict(status='completed', approval_token='', summary='done', outputs={}))
+        for result_event in ([], [json.dumps({'type': 'result', 'result': 'task finished'})]):
+            with self.subTest(result_event=result_event):
+                chunks = ['正在更新报告。', 'FINAL_', receipt[len('FINAL_'):30], receipt[30:]]
+                process = self._process(*[
+                    json.dumps({'type': 'assistant', 'timestamp_ms': i, 'message': {'content': chunk}})
+                    for i, chunk in enumerate(chunks)
+                ], *result_event)
+                with patch('agents.cursor.build_cursor_base_cmd', return_value=['agent', '-p']), \
+                        patch('agents.cursor.subprocess.Popen', return_value=process):
+                    result = CursorAgent().run('/work/repo', 'develop')
+                self.assertEqual(parse_final_answer(result.text)['status'], 'completed')
+
+    def test_complete_assistant_snapshot_can_supply_receipt_after_deltas(self):
+        receipt = 'FINAL_ANSWER\n' + json.dumps(dict(status='completed', approval_token='', summary='done', outputs={}))
+        for extra in ({'model_call_id': 'call-1'}, {}):
+            with self.subTest(extra=extra):
+                process = self._process(
+                    json.dumps({'type': 'assistant', 'timestamp_ms': 1, 'message': {'content': '正在写报告。'}}),
+                    json.dumps({'type': 'assistant', **extra, 'message': {'content': receipt}}),
+                )
+                with patch('agents.cursor.build_cursor_base_cmd', return_value=['agent', '-p']), \
+                        patch('agents.cursor.subprocess.Popen', return_value=process):
+                    result = CursorAgent().run('/work/repo', 'develop')
+                self.assertEqual(parse_final_answer(result.text)['status'], 'completed')
+
     def _process(self, *lines, returncode=0):
         process = MagicMock()
         process.stdout.readline.side_effect = [*(line + "\n" for line in lines), ""]
@@ -104,7 +132,7 @@ class CursorAgentTests(unittest.TestCase):
         self.assertIn("FINAL_ANSWER", result.text)
         self.assertIn('"approval_token":"同意方案"', result.text)
 
-    def test_retries_keepalive_timeout_once_after_three_seconds(self):
+    def test_retries_keepalive_timeout_with_configured_delay(self):
         timed_out_process = self._process(
             "RetriableError: [internal] HTTP/2 keepalive ping timed out after 5000ms",
             returncode=1,
@@ -121,9 +149,9 @@ class CursorAgentTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.text, "retried successfully")
         self.assertEqual(popen.call_count, 2)
-        sleep.assert_called_once_with(3)
+        sleep.assert_called_once_with(RETRY_DELAY_SECONDS)
 
-    def test_retries_tls_connection_disconnect_once_after_three_seconds(self):
+    def test_retries_tls_connection_disconnect_with_configured_delay(self):
         disconnected_process = self._process(
             "Error: [aborted] Client network socket disconnected before secure TLS connection was established",
             returncode=1,
@@ -140,7 +168,7 @@ class CursorAgentTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.text, "retried successfully")
         self.assertEqual(popen.call_count, 2)
-        sleep.assert_called_once_with(3)
+        sleep.assert_called_once_with(RETRY_DELAY_SECONDS)
 
     def test_retries_writable_iterable_closed_after_resumed_keepalive_failure(self):
         keepalive_process = self._process(

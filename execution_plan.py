@@ -3,10 +3,13 @@
 import hashlib
 import json
 import os
+from datetime import datetime
+
+from workflow_blockers import SUSPENDED_STATUSES, validate_suspension
 
 BLOCKED_STATUS = "阻塞"
 BLOCKING_STATUS_MARKERS = ("阻塞", "阻断")
-DEMAND_STATUSES = {"拆分中", "拆分评审中", "需求分析中", "需求评审中", "开发中", "记忆整理中", "已完成", "阻塞"}
+DEMAND_STATUSES = {"拆分中", "拆分评审中", "需求分析中", "需求评审中", "开发中", "记忆整理中", "已完成", "阻塞", "执行结束（有未通过项）"} | SUSPENDED_STATUSES
 LEGACY_ITEM_STATUS_MAP = {
     "待需求分析": "需求分析中",
     "待需求评审": "需求评审中",
@@ -14,7 +17,6 @@ LEGACY_ITEM_STATUS_MAP = {
     "待实施": "待开发",
     "返工中": "开发中",
     "待记忆整理": "记忆整理中",
-    "静态扫描中": "开发中",
 }
 
 
@@ -41,7 +43,7 @@ class ExecutionPlanStore:
             if changed:
                 self.write(plan)
         except ValueError as error:
-            if "未知需求整体状态" in str(error):
+            if "未知需求整体状态" in str(error) or "时间" in str(error):
                 raise
             return False
         return True
@@ -80,6 +82,106 @@ class ExecutionPlanStore:
                 item["status"] = status
                 self.write(plan)
                 return
+        raise ValueError(f"找不到需求 ID: {requirement_id}")
+
+    def set_item_started(self, requirement_id, started_at):
+        self.validate_timestamp(started_at, "started_at")
+        plan = self.read()
+        self.normalize_plan(plan, None)
+        for item in plan.get("items", []):
+            if item.get("id") != requirement_id:
+                continue
+            existing = item.get("started_at")
+            if existing is not None:
+                self.validate_timestamp(existing, "started_at")
+                return existing
+            item["started_at"] = started_at
+            self.write(plan)
+            return started_at
+        raise ValueError(f"找不到需求 ID: {requirement_id}")
+
+    def suspend(self, requirement_id, status, resume_status, details):
+        """Persist the stop reason and state together, including demand-level stops."""
+        if status not in SUSPENDED_STATUSES:
+            raise ValueError('未知挂起状态')
+        plan = self.read()
+        target = self._agent_session_target(plan, requirement_id)
+        if target.get('status') == status == '未通过，跳过执行' and target.get('suspension'):
+            return
+        previous = target.get('suspension', {})
+        target['suspension'] = {
+            **details, 'resume_status': resume_status,
+            'recorded_at': datetime.now().astimezone().isoformat(),
+            'recovery_attempts': previous.get('recovery_attempts', []),
+        }
+        target['status'] = status
+        target.pop('completed_at', None)
+        if requirement_id is not None:
+            validate_suspension(target)
+        self.write(plan)
+
+    def record_continuation(self, requirement_id, stage, response, details=None):
+        plan = self.read()
+        target = self._agent_session_target(plan, requirement_id)
+        note = dict(stage=stage, response=str(response))
+        if details:
+            note['details'] = details
+        notes = target.setdefault('continuation_notes', [])
+        if not notes or notes[-1] != note:
+            notes.append(note)
+            self.write(plan)
+
+    def record_review_limit(self, requirement_id, stage, response):
+        """End the attempt, not downstream scheduling; retain rejection truth."""
+        plan = self.read()
+        target = self._agent_session_target(plan, requirement_id)
+        key = 'requirements_review' if stage == '需求评审中' else 'code_review'
+        target.setdefault('review_outcomes', {}).setdefault(key, dict(
+            status='not_approved', reason='达到 10 次上限', last_feedback=str(response)))
+        target['status'] = '待开发' if key == 'requirements_review' else '未通过，跳过执行'
+        self.write(plan)
+
+    def migrate_item_stops(self):
+        """One-way compatibility for retired item blocking; never reset attempts."""
+        plan = self.read()
+        changed_ids = []
+        for item in plan.get('items', []):
+            suspension = item.get('suspension') or {}
+            old_status = item.get('status')
+            if old_status == '外部阻塞':
+                stage = suspension.get('resume_status')
+                item['status'] = stage if stage in {'需求分析中', '需求评审中', '开发中', '代码评审中'} else '需求分析中'
+                item.setdefault('continuation_notes', []).append(dict(
+                    stage=item['status'], response='旧 blocked 已撤销，请按降级策略继续：' + json.dumps(suspension, ensure_ascii=False)))
+            elif old_status == '未通过，跳过执行' and suspension.get('resume_status') == '需求评审中':
+                item['status'] = '待开发'
+                item.setdefault('review_outcomes', {}).setdefault('requirements_review', dict(
+                    status='not_approved', reason=suspension.get('reason'), last_feedback=suspension.get('last_feedback', '旧需求评审达上限')))
+            else:
+                continue
+            if 'suspension' in item:
+                item.setdefault('suspension_history', []).append(item.pop('suspension'))
+            changed_ids.append(item['id'])
+        if changed_ids:
+            self.write(plan)
+        return changed_ids
+
+    def complete_item(self, requirement_id, completed_at, valid_statuses, expected_source_hash=None):
+        self.validate_timestamp(completed_at, "completed_at")
+        plan = self.read()
+        self.normalize_plan(plan, valid_statuses)
+        self.validate(plan, valid_statuses, expected_source_hash)
+        for item in plan["items"]:
+            if item["id"] != requirement_id:
+                continue
+            started_at = item.get("started_at")
+            self.validate_timestamp(started_at, "started_at")
+            persisted_completed_at = item.get("completed_at", completed_at)
+            self.validate_timestamp(persisted_completed_at, "completed_at")
+            item["status"] = "已完成"
+            item["completed_at"] = persisted_completed_at
+            self.write(plan)
+            return started_at, persisted_completed_at
         raise ValueError(f"找不到需求 ID: {requirement_id}")
 
     def set_demand_status(self, status, source=None):
@@ -127,6 +229,42 @@ class ExecutionPlanStore:
             if item.get("id") == requirement_id:
                 return item.get("pending_feedback")
         raise ValueError(f"找不到需求 ID: {requirement_id}")
+
+    def increment_stage_attempt(self, stage, requirement_id=None):
+        """Persist a stage attempt so re-entry cannot reset an infinite loop."""
+        if not isinstance(stage, str) or not stage.strip():
+            raise ValueError("阶段名称无效。")
+        plan = self.read()
+        self.normalize_plan(plan, None)
+        target = self._agent_session_target(plan, requirement_id)
+        attempts = target.setdefault("stage_attempts", {})
+        current = attempts.get(stage, 0)
+        if not isinstance(current, int) or current < 0:
+            current = 0
+        attempts[stage] = current + 1
+        self.write(plan)
+        return attempts[stage]
+
+    def get_stage_attempt(self, stage, requirement_id=None):
+        if not isinstance(stage, str) or not stage.strip():
+            raise ValueError("阶段名称无效。")
+        plan = self.read()
+        self.normalize_plan(plan, None)
+        target = self._agent_session_target(plan, requirement_id)
+        attempts = target.get("stage_attempts", {})
+        value = attempts.get(stage, 0) if isinstance(attempts, dict) else 0
+        return value if isinstance(value, int) and value >= 0 else 0
+
+    def clear_agent_session(self, agent_name, *, requirement_id=None):
+        """Remove matching references, including legacy session lookup fallbacks."""
+        plan = self.read()
+        self.normalize_plan(plan, None)
+        targets = [plan["demand"], *plan.get("items", [])]
+        for target in targets:
+            sessions = target.get("agent_sessions")
+            if isinstance(sessions, dict):
+                sessions.pop(agent_name, None)
+        self.write(plan)
 
     def set_agent_session(self, agent_name, *, session_id, prompt_file, agent_type, requirement_id=None):
         if not isinstance(agent_name, str) or not agent_name.strip():
@@ -182,6 +320,12 @@ class ExecutionPlanStore:
             return status
         normalized = status.strip()
         normalized = LEGACY_ITEM_STATUS_MAP.get(normalized, normalized)
+        # Only the break workflow retired this stage. Context-free storage must
+        # not migrate a valid normal-workflow stage while saving sessions, etc.
+        if normalized == "静态扫描中" and valid_statuses is not None and normalized not in valid_statuses:
+            normalized = "开发中"
+        if normalized in SUSPENDED_STATUSES:
+            return normalized
         if any(marker in normalized for marker in BLOCKING_STATUS_MARKERS):
             return BLOCKED_STATUS
         if valid_statuses is None:
@@ -195,9 +339,22 @@ class ExecutionPlanStore:
         if not isinstance(status, str):
             return status
         normalized = status.strip()
+        if normalized in SUSPENDED_STATUSES:
+            return normalized
         if any(marker in normalized for marker in BLOCKING_STATUS_MARKERS):
             return BLOCKED_STATUS
         return normalized
+
+    @staticmethod
+    def validate_timestamp(value, field):
+        if not isinstance(value, str):
+            raise ValueError(f"执行计划条目的时间字段无效: {field}")
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError as error:
+            raise ValueError(f"执行计划条目的时间字段无效: {field}") from error
+        if parsed.utcoffset() is None:
+            raise ValueError(f"执行计划条目的时间字段缺少时区: {field}")
 
     @staticmethod
     def normalize_plan(plan, valid_statuses):
@@ -284,6 +441,7 @@ class ExecutionPlanStore:
                 raise ValueError("执行计划条目缺少有效的顺序、ID 或名称。")
             if item["status"] not in valid_statuses:
                 raise ValueError(f"未知需求状态: {item['status']}")
+            validate_suspension(item)
             if any(not isinstance(dependency, str) or not dependency.strip() for dependency in item["dependencies"]):
                 raise ValueError("执行计划条目的前置依赖无效。")
             if "pending_feedback" in item and item["pending_feedback"] is not None:
@@ -293,6 +451,11 @@ class ExecutionPlanStore:
                 for field in ("kind", "source_status", "message"):
                     if not isinstance(feedback.get(field), str):
                         raise ValueError(f"执行计划条目的待处理反馈字段无效: {field}")
+            for field in ("started_at", "completed_at"):
+                if field in item:
+                    ExecutionPlanStore.validate_timestamp(item[field], field)
+            if "completed_at" in item and "started_at" not in item:
+                raise ValueError("执行计划条目存在完成时间但缺少开始时间。")
 
     @staticmethod
     def validate_demand(plan):

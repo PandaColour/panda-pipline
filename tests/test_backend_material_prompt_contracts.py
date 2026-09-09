@@ -219,8 +219,32 @@ class BackendMaterialPromptContractTests(unittest.TestCase):
         writer = (ROOT / "break-system-prompt" / "requirement_breaker.md").read_text(encoding="utf-8")
 
         self.assertIn("原始完整 URL", writer)
-        self.assertIn("`summary` 必须包含同一个原始完整 URL", writer)
+        self.assertIn("原始完整 URL、实际错误、影响和所需用户动作必须写入本阶段报告", writer)
         self.assertIn("不得只填写文档名称", writer)
+
+    def test_all_breakdown_and_delivery_prompts_require_remote_source_provenance(self):
+        prompt_files = [
+            ROOT / "break-system-prompt" / "requirement_breaker.md",
+            ROOT / "break-system-prompt" / "requirement_break_reviewer.md",
+            ROOT / "break-system-prompt" / "item_requirements_analyst.md",
+            ROOT / "break-system-prompt" / "item_requirements_reviewer.md",
+            ROOT / "break-system-prompt" / "item_developer.md",
+            ROOT / "break-system-prompt" / "item_code_reviewer.md",
+        ]
+        for prompt_file in prompt_files:
+            content = prompt_file.read_text(encoding="utf-8")
+            for expected in (
+                "source_id",
+                "原始完整 URL",
+                "revision",
+                "retrieved_at",
+                "scope",
+                "verified|partial|failed",
+                "文档冲突",
+                "文档缺失",
+                "Agent 自主决策",
+            ):
+                self.assertIn(expected, content, prompt_file.name)
 
     def test_item_prompts_require_reading_batch_shared_context(self):
         for prompt_file in SHARED_CONTEXT_CONSUMER_PROMPTS:
@@ -257,7 +281,7 @@ class BackendMaterialPromptContractTests(unittest.TestCase):
             self.assertIn("真实联调未验证", content, prompt_file.name)
 
         reviewer = prompt_files[1].read_text(encoding="utf-8")
-        self.assertIn("不得仅因缺少真实端到端验证而不通过", reviewer)
+        self.assertIn("当前降级方案满足时可通过", reviewer)
         self.assertIn("应输出 `approved`", reviewer)
         self.assertNotIn("status=requirement_change", reviewer)
 
@@ -347,6 +371,34 @@ class BackendMaterialPromptContractTests(unittest.TestCase):
             self.assertIn("图标尺寸", content, prompt_file.name)
             self.assertIn("无法获取参考图", content, prompt_file.name)
 
+    def test_figma_reference_screen_contract_is_per_critical_page_not_per_state(self):
+        prompt_files = [
+            ROOT / "break-system-prompt" / "requirement_breaker.md",
+            ROOT / "break-system-prompt" / "requirement_break_reviewer.md",
+            ROOT / "break-system-prompt" / "item_requirements_analyst.md",
+            ROOT / "system-prompt" / "requirements_analyst.md",
+            ROOT / "system-prompt" / "requirements_reviewer.md",
+        ]
+        for prompt_file in prompt_files:
+            content = prompt_file.read_text(encoding="utf-8")
+            reference_screen_lines = [
+                line
+                for line in content.splitlines()
+                if "`figma_assets/reference_screens/`" in line
+            ]
+            self.assertTrue(
+                any(
+                    "每个关键页面必须有参考效果图保存到 `figma_assets/reference_screens/`"
+                    in line
+                    for line in reference_screen_lines
+                ),
+                prompt_file.name,
+            )
+            for line in reference_screen_lines:
+                self.assertNotIn("每个关键页面的每个关键状态", line, prompt_file.name)
+                self.assertNotIn("关键页面 × 关键状态", line, prompt_file.name)
+                self.assertNotIn("页面 × 状态", line, prompt_file.name)
+
     def test_developer_prompts_require_backend_mock_disclosure_and_human_todo(self):
         for prompt_file in DEVELOPER_PROMPTS:
             content = prompt_file.read_text(encoding="utf-8")
@@ -426,6 +478,16 @@ class BackendMaterialPromptContractTests(unittest.TestCase):
         self.assertNotIn("adb_safe.py", developer)
         self.assertNotIn("adb_safe.py", reviewer)
 
+    def test_android_runnable_prompts_require_avd_start_attempt(self):
+        developer = (ROOT / "break-system-prompt" / "item_developer.md").read_text(encoding="utf-8")
+        reviewer = (ROOT / "break-system-prompt" / "item_code_reviewer.md").read_text(encoding="utf-8")
+        for content in (developer, reviewer):
+            self.assertIn("emulator -list-avds", content)
+            self.assertIn("emulator -avd", content)
+            self.assertIn("未尝试启动", content)
+        self.assertIn("changes_requested", reviewer)
+        self.assertIn("实际执行启动命令后仍失败", reviewer)
+
     def test_review_prompts_allow_disclosed_mocks_but_require_backend_todo(self):
         for prompt_file in REVIEW_PROMPTS:
             content = prompt_file.read_text(encoding="utf-8")
@@ -454,18 +516,18 @@ class BackendMaterialPromptContractTests(unittest.TestCase):
 
         self.assertIn("外部服务不可用不得阻塞代码审查通过", content)
         self.assertIn("不得把取得外部签收、恢复服务或提供业务审批令牌作为 developer 的修改项", content)
-        self.assertIn("无法由代码、测试或报告修改解决", content)
+        self.assertIn("只是外部环境/权限/真实证据缺失时按 Mock/Stub/Fake", content)
         self.assertIn("status=requirement_change", content)
         self.assertIn("不得重复返回 changes_requested", content)
         self.assertIn("不得猜测协议或安全策略", content)
 
-    def test_item_code_reviewer_routes_unverifiable_required_ac_to_requirement_change(self):
+    def test_item_code_reviewer_uses_fallback_for_unverifiable_required_ac(self):
         content = ITEM_CODE_REVIEWER_PROMPT.read_text(encoding="utf-8")
 
-        self.assertNotIn("blocked", content)
+        self.assertNotIn('"status":"blocked"', content)
         self.assertIn("外部条件导致“必须”AC无法达到 required_level", content)
-        self.assertIn("统一返回 `requirement_change`", content)
-        self.assertIn("不得输出 `approved` 或 `changes_requested`", content)
+        self.assertIn("按既定降级策略验收可控工作", content)
+        self.assertIn("不得返回 blocked", content)
 
     def test_item_delivery_prompts_execute_and_review_per_target_delivery_gates(self):
         developer = (ROOT / "break-system-prompt" / "item_developer.md").read_text(
@@ -489,8 +551,8 @@ class BackendMaterialPromptContractTests(unittest.TestCase):
         self.assertIn("实际执行", developer)
         self.assertIn("test_report.md", reviewer)
         self.assertIn("较低级别证据", reviewer)
-        self.assertIn("统一返回 `requirement_change`", reviewer)
-        self.assertNotIn("blocked", reviewer)
+        self.assertIn("按既定降级策略审查可控实现", reviewer)
+        self.assertNotIn('"status":"blocked"', reviewer)
 
     def test_generic_code_review_prompt_blocks_missing_minimum_smoke_tests(self):
         content = (ROOT / "system-prompt" / "code_reviewer.md").read_text(encoding="utf-8")

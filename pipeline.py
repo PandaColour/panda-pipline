@@ -1,12 +1,14 @@
+from pipeline_tasks import PipelineTaskMixin, CALL_FAILURE
 import os
 from agents import Agent
-from config import SYSTEM_PROMPT_DIR
+from config import SYSTEM_PROMPT_DIR, get_agent_type
 from execution_plan import ExecutionPlanStore
 from review_decision import review_passed, structured_final_answer_decision
 from static_scan import resolve_scan_root, run_static_scan
 from workflow import human_gate
+from task_protocol import read_resource_blocker
 
-MAX_REQUIREMENT_REVIEW_ATTEMPTS = 3
+MAX_REQUIREMENT_REVIEW_ATTEMPTS = 10
 MEMORY_CURATION_PROMPT = "memory_curation.md"
 VALID_STATUSES = {
     "需求分析中",
@@ -20,6 +22,7 @@ VALID_STATUSES = {
     "记忆整理中",
     "已完成",
     "阻塞",
+    "未通过，跳过执行",
 }
 REQUIREMENT_ID = "R-001"
 REQUIREMENT_DIR_NAME = "R-001-main"
@@ -27,7 +30,7 @@ REQUIREMENTS_FILE = f"{REQUIREMENT_DIR_NAME}/user_requirements.md"
 ACCEPTANCE_SUMMARY = "单需求完成需求分析、开发验证、人工确认和记忆整理"
 
 
-class Pipeline:
+class Pipeline(PipelineTaskMixin):
     """Multi-agent pipeline with feedback loops and human review gates."""
 
     def __init__(self, work_dir, skip_human=False):
@@ -55,7 +58,7 @@ class Pipeline:
         return human_gate(stage_name, review_file_path, **gate_options)
 
     @staticmethod
-    def _resource_blocker(response):
+    def _resource_blocker(response, work_dir=None):
         """Detect a resource-access blocked response from the analyst."""
         if not isinstance(response, str):
             return None
@@ -63,6 +66,8 @@ class Pipeline:
         if decision is None:
             return None
         blocker = decision.get("blocker")
+        if blocker is None and work_dir:
+            blocker = read_resource_blocker(decision, work_dir)
         if not isinstance(blocker, dict):
             return None
         if blocker.get("kind") not in {"file_unreadable", "material_permission_denied"}:
@@ -76,7 +81,7 @@ class Pipeline:
 
     def _resolve_resource_blocker(self, analyst, response):
         """Force human intervention for resource access issues (不受 --skipHuman 影响)."""
-        while blocker := self._resource_blocker(response):
+        while blocker := self._resource_blocker(response, self.work_dir):
             summary = blocker.get("summary") or blocker.get("reason") or "需求分析所需资源不可访问"
             print(
                 "⚠️ 资源访问阻塞："
@@ -98,11 +103,9 @@ class Pipeline:
                     skip_human=False,
                     feedback_target=analyst.display_name,
                 )
-            response = analyst.send_message(
-                f"用户已处理资源访问阻塞：{feedback}\n"
+            response = self._send_task(analyst, f"用户已处理资源访问阻塞：{self._handoff('feedback', feedback)}\n"
                 "请重新读取所需文件或物料并更新需求文档；若仍无法读取文件或因权限无法获取物料，"
-                "请继续按资源访问阻塞协议报告。"
-            )
+                "请继续按资源访问阻塞协议报告。", 'analysis')
         return response
 
     def has_resumable_state(self):
@@ -111,13 +114,13 @@ class Pipeline:
             return False
         return plan["items"][0]["status"] != "已完成"
 
-    def _create_agent(self, name, prompt_file):
+    def _create_agent(self, name, prompt_file, role):
         agent = Agent(
             name,
             prompt_file,
             self.work_dir,
             add_dirs=None,
-            agent_type="cursor",
+            agent_type=get_agent_type(role),
             prompt_dir=self.prompt_dir,
             status_provider=self._agent_status,
         )
@@ -146,11 +149,15 @@ class Pipeline:
             self._archive_completed_requirements()
         self._ensure_execution_plan(user_idea)
         status = self._item_status()
+        if status == '未通过，跳过执行':
+            return False
         if status in {"需求分析中", "需求评审中", "待需求人工确认"}:
-            self._run_stage_1_requirements()
+            if self._run_stage_1_requirements() is False:
+                return False
             status = self._item_status()
         if status in {"待开发", "开发中", "静态扫描中", "代码评审中", "待人工确认"}:
-            self._run_stage_2_development()
+            if self._run_stage_2_development() is False:
+                return False
             status = self._item_status()
         if status == "记忆整理中":
             self._set_demand_status("记忆整理中")
@@ -181,6 +188,9 @@ class Pipeline:
             source if user_idea is not None else demand.get("source", ""),
             item.get("pending_feedback"),
         )
+        for key in ('stage_attempts', 'attempt_history', 'review_outcomes', 'agent_sessions'):
+            if key in item:
+                plan['items'][0][key] = item[key]
         self.execution_plan.write(plan)
 
     def _valid_existing_plan(self):
@@ -243,8 +253,16 @@ class Pipeline:
         self._ensure_execution_plan(user_idea)
         self._set_demand_status("需求分析中")
 
-        analyst = self._create_agent("需求分析", "requirements_analyst.md")
-        reviewer = self._create_agent("需求审查", "requirements_reviewer.md")
+        analyst = self._create_agent(
+            "需求分析",
+            "requirements_analyst.md",
+            "requirements_analyst",
+        )
+        reviewer = self._create_agent(
+            "需求审查",
+            "requirements_reviewer.md",
+            "requirements_reviewer",
+        )
 
         if user_idea is None:
             user_idea = self._demand_source()
@@ -273,12 +291,12 @@ class Pipeline:
                 f"请根据以下初始想法进行深度需求分析，创建{self.user_requirements_file},返回前确保文件创建成功"
                 f"请详细列出功能模块和技术栈选型。"
                 f"{existing_context}"
-                f"初始想法：{user_idea}"
+                f"初始想法：{self._handoff('user_idea', user_idea)}"
             )
             feedback = self._pending_feedback_message()
             if feedback:
-                analysis_prompt += f"待处理反馈：{feedback}"
-            analyst_response = analyst.send_message(analysis_prompt)
+                analysis_prompt += f"待处理反馈：{self._handoff('feedback', feedback)}"
+            analyst_response = self._send_task(analyst, analysis_prompt, 'analysis')
             analyst_response = self._resolve_resource_blocker(analyst, analyst_response)
             self._clear_pending_feedback()
             self._set_status("需求评审中")
@@ -286,29 +304,30 @@ class Pipeline:
         while True:
             self._set_demand_status("需求评审中")
             review_prompt = (
-                f"请审查 {self.user_requirements_file} 文件中的需求分析，原始需求: {user_idea}"
-                f"评估其完整性、一致性和可行性。如果满意，最终回复按 FINAL_ANSWER JSON 协议输出 status=approved 且 approval_token=同意方案。"
+                f"请审查 {self.user_requirements_file} 文件中的需求分析，原始需求: {self._handoff('user_idea', user_idea)}"
+                f"评估其完整性、一致性和可行性。如果满意，最终回复按 FINAL_ANSWER JSON 协议输出 status=approved。"
                 f"如果不满意，请提供具体的修改建议。"
             )
             for attempt in range(1, MAX_REQUIREMENT_REVIEW_ATTEMPTS + 1):
-                review_response = reviewer.send_message(review_prompt)
+                review_response = self._send_task(reviewer, review_prompt, 'requirements_review')
 
-                if review_passed(review_response, "同意方案"):
+                if review_response.startswith(CALL_FAILURE):
+                    if self.execution_plan.get_stage_attempt('requirements_review', REQUIREMENT_ID) >= 10:
+                        return self._stop_review('requirements_review')
+                    continue
+                if review_passed(review_response):
                     break
-                if attempt >= MAX_REQUIREMENT_REVIEW_ATTEMPTS:
-                    print("⚠️ 需求审查连续 3 次未通过，按策略自动进入人工确认，让后续流程先完成可完成内容。")
-                    break
+                if self.execution_plan.get_stage_attempt('requirements_review', REQUIREMENT_ID) >= MAX_REQUIREMENT_REVIEW_ATTEMPTS:
+                    return self._stop_review('requirements_review')
                 self._set_pending_feedback("requirements_review", "需求评审中", review_response)
                 self._set_status("需求分析中")
-                analyst.send_message(
-                    f"需求审查提出了以下修改意见，请根据意见调整并更新 "
-                    f"{self.user_requirements_file}。修改意见：{review_response}"
-                )
+                self._send_task(analyst, f"需求审查提出了以下修改意见，请根据意见调整并更新 "
+                    f"{self.user_requirements_file}。修改意见：{self._handoff('review_response', review_response)}", 'analysis')
                 self._clear_pending_feedback()
                 self._set_status("需求评审中")
                 review_prompt = (
                     f"请继续审查 {self.user_requirements_file} 文件中的需求分析,分析agent对它进行了一些修改"
-                    f"评估其完整性、一致性和可行性。如果满意，最终回复按 FINAL_ANSWER JSON 协议输出 status=approved 且 approval_token=同意方案。"
+                    f"评估其完整性、一致性和可行性。如果满意，最终回复按 FINAL_ANSWER JSON 协议输出 status=approved。"
                     f"如果不满意，请提供具体的修改建议。"
                 )
 
@@ -320,10 +339,8 @@ class Pipeline:
                 break
             self._set_pending_feedback("requirements_human", "待需求人工确认", human_feedback)
             self._set_status("需求分析中")
-            analyst.send_message(
-                f"用户审查后提出了修改意见，请根据以下意见调整并更新 "
-                f"{self.user_requirements_file}。修改意见：{human_feedback}"
-            )
+            self._send_task(analyst, f"用户审查后提出了修改意见，请根据以下意见调整并更新 "
+                f"{self.user_requirements_file}。修改意见：{self._handoff('human_feedback', human_feedback)}", 'analysis')
             self._clear_pending_feedback()
             self._set_status("需求评审中")
 
@@ -336,8 +353,16 @@ class Pipeline:
         self._ensure_execution_plan()
         self._set_demand_status("开发中")
 
-        developer = self._create_agent("代码开发", "code_developer.md")
-        code_reviewer = self._create_agent("代码验证审查", "code_reviewer.md")
+        developer = self._create_agent(
+            "代码开发",
+            "code_developer.md",
+            "developer",
+        )
+        code_reviewer = self._create_agent(
+            "代码验证审查",
+            "code_reviewer.md",
+            "code_reviewer",
+        )
 
         # 静态扫描拥有独立状态：开发完成后进入“静态扫描中”，扫描完成后再进入“代码评审中”。
         # 重启时若处于“静态扫描中”则续跑扫描；若已处于“代码评审中”且扫描报告存在，
@@ -374,28 +399,30 @@ class Pipeline:
                 )
                 feedback = self._pending_feedback_message()
                 if feedback:
-                    develop_prompt += f"\n待处理反馈：{feedback}\n请仅修正当前需求。"
-                developer.send_message(develop_prompt)
+                    develop_prompt += f"\n待处理反馈：{self._handoff('feedback', feedback)}\n请仅修正当前需求。"
+                self._send_task(developer, develop_prompt, 'development')
                 self._clear_pending_feedback()
                 self._set_status("静态扫描中")
                 scan_pending = True
                 continue
 
-            review_response = code_reviewer.send_message(
-                f"请先阅读 {self.user_requirements_file}、"
+            review_response = self._send_task(code_reviewer, f"请先阅读 {self.user_requirements_file}、"
                 f"{self.develop_report_file}、{self.static_scan_report_file} 和 {self.work_dir} 下的代码、测试。"
                 f"执行必要测试，并将测试范围、命令、结果和遗留问题写入 {self.test_report_file}；"
                 f"如有 Bug 生成 {self.bug_report_file}。"
                 f"然后审查 {self.work_dir} 下的代码和测试。"
                 f"将代码审查结论写入 {self.code_review_file}。"
-                f"如果所有检查通过，最终回复按 FINAL_ANSWER JSON 协议输出 status=approved 且 approval_token=任务完成。"
-                f"否则请提供具体的修改建议。"
-            )
+                f"如果所有检查通过，最终回复按 FINAL_ANSWER JSON 协议输出 status=approved。"
+                f"否则请提供具体的修改建议。", 'code_review')
 
-            if review_response is None or review_response == "":
-                review_response = "任务完成"
+            if review_response.startswith(CALL_FAILURE):
+                if self.execution_plan.get_stage_attempt('code_review', REQUIREMENT_ID) >= 10:
+                    return self._stop_review('code_review')
+                continue
+            if not review_passed(review_response) and self.execution_plan.get_stage_attempt('code_review', REQUIREMENT_ID) >= 10:
+                return self._stop_review('code_review')
 
-            if review_passed(review_response, "任务完成"):
+            if review_passed(review_response):
                 self._set_status("待人工确认")
                 human_feedback = self._human_gate("2. 代码开发", self.requirement_dir, developer)
                 if human_feedback is None:
@@ -403,25 +430,30 @@ class Pipeline:
                     break
                 self._set_pending_feedback("human", "待人工确认", human_feedback)
                 self._set_status("开发中")
-                developer.send_message(
-                    f"用户审查后提出修改意见：{human_feedback}"
-                    f"\n请根据意见修改代码。"
-                )
+                self._send_task(developer, f"用户审查后提出修改意见：{self._handoff('human_feedback', human_feedback)}"
+                    f"\n请根据意见修改代码。", 'development')
                 self._clear_pending_feedback()
                 self._set_status("静态扫描中")
                 scan_pending = True
             else:
                 self._set_pending_feedback("code_review", "代码评审中", review_response)
                 self._set_status("开发中")
-                developer.send_message(
-                    f"代码审查提出修改意见：{review_response}"
-                    f"\n请根据意见修改代码。"
-                )
+                self._send_task(developer, f"代码审查提出修改意见：{self._handoff('review_response', review_response)}"
+                    f"\n请根据意见修改代码。", 'development')
                 self._clear_pending_feedback()
                 self._set_status("静态扫描中")
                 scan_pending = True
 
     # ==================== Static code scan ====================
+
+    def _stop_review(self, stage):
+        self.execution_plan.record_review_limit(REQUIREMENT_ID,
+            '需求评审中' if stage == 'requirements_review' else '代码评审中',
+            str(self._last_attempt(stage, REQUIREMENT_ID)))
+        self._set_status('未通过，跳过执行')
+        self._set_demand_status('执行结束（有未通过项）')
+        print('⚠️ 审核累计 10 次已耗尽；详见 execution_plan.json 的 attempt_history。')
+        return False
 
     def _run_static_scan(self):
         """多语言静态扫描（Kotlin/Java/Python/JS/TS/Swift），结果写入 static_scan_report.md。
@@ -518,7 +550,7 @@ class Pipeline:
                     "业务规则、状态流转、场景流程、接口约束、UI/Figma 约束、验收规则和待确认边界。"
                 ),
                 execution_plan_file=self.execution_plan_file,
-                closing_instruction="审查报告只作为证据输入；不得修改需求、报告、执行计划或源码。",
+                closing_instruction="审查报告只作为证据输入；只可写调用指定的记忆文档与记忆报告；不得修改需求、既有审核报告、执行计划或源码。",
             ),
             "代码开发": self._render_system_prompt(
                 MEMORY_CURATION_PROMPT,
@@ -530,7 +562,7 @@ class Pipeline:
                 ),
                 execution_plan_file=self.execution_plan_file,
                 closing_instruction=(
-                    "审查报告只作为证据输入；不得修改需求、报告、执行计划或源码。"
+                    "审查报告只作为证据输入；只可写调用指定的记忆文档与记忆报告；不得修改需求、既有审核报告、执行计划或源码。"
                     f"最后将沉淀结果、证据来源、更新的 memory 文件和后续注意事项写入 {self.memory_report_file}。"
                 ),
             ),
@@ -542,6 +574,6 @@ class Pipeline:
                 print(f"⚠️  未找到角色为 {name} 的 Agent，跳过。")
                 continue
             print(f"\n📤 向 {agent.display_name} 发送记忆总结指令...")
-            agent.send_message(message)
+            self._send_task(agent, message, 'memory_analysis' if name == '需求分析' else 'memory_development')
 
         print("\n✅ 记忆总结完成。")

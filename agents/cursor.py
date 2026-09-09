@@ -6,8 +6,9 @@ import sys
 import time
 
 from ._result import AgentRunResult
+from ._retry import run_with_retry
 from ._cli import executable_name
-from review_decision import structured_review_decision
+from review_decision import structured_final_answer_decision, REVIEW_STATUSES
 
 
 CURSOR_BASE_CMD = [
@@ -49,11 +50,12 @@ def _subprocess_env():
 def _preferred_result_text(stream_state, text_parts):
     candidates = [
         stream_state["result_text"],
+        stream_state.get("assistant_snapshot"),
         stream_state["last_assistant_text"],
         "".join(text_parts),
     ]
     for candidate in candidates:
-        if candidate and structured_review_decision(candidate) is not None:
+        if candidate and structured_final_answer_decision(candidate, REVIEW_STATUSES | {'completed'}) is not None:
             return candidate
     return stream_state["result_text"] or stream_state["last_assistant_text"] or "".join(text_parts)
 
@@ -87,13 +89,15 @@ def parse_stream(json_line, stream_state):
         stream_state["session_id"] = session_id
     event_type = data.get("type", "")
     if event_type == "assistant":
-        if "model_call_id" in data:
-            return ""
         text = _message_text(data.get("message", {}))
+        if "model_call_id" in data:
+            stream_state["assistant_snapshot"] = text
+            return ""
         is_delta = "timestamp_ms" in data
         if is_delta:
             stream_state["saw_streaming_assistant"] = True
         elif stream_state.get("saw_streaming_assistant"):
+            stream_state["assistant_snapshot"] = text
             return ""
         if text:
             stream_state["last_assistant_text"] = text
@@ -111,20 +115,18 @@ def parse_stream(json_line, stream_state):
     if text:
         sys.stdout.write(text)
         sys.stdout.flush()
-    return text
+    # Result is a separate candidate, not another assistant delta. Appending
+    # it would duplicate a final receipt or add trailing prose to valid JSON.
+    return text if event_type == "assistant" else ""
 
 
 class CursorAgent:
     def run(self, work_dir, message, system_prompt=None, session_id=None, add_dirs=None):
-        current_session_id = session_id
-        result = self._run_once(work_dir, message, system_prompt, current_session_id, add_dirs)
-        for _attempt in range(MAX_RETRIES):
-            current_session_id = result.session_id or current_session_id
-            if result.returncode == 0:
-                return result
-            time.sleep(RETRY_DELAY_SECONDS)
-            result = self._run_once(work_dir, message, system_prompt, current_session_id, add_dirs)
-        return result
+        return run_with_retry(
+            lambda current: self._run_once(work_dir, message, system_prompt, current, add_dirs),
+            session_id, retries=getattr(self, "max_retries", MAX_RETRIES), delay=RETRY_DELAY_SECONDS, sleep=time.sleep,
+            invalidate=getattr(self, "session_invalidation_callback", None),
+        )
 
     def _run_once(self, work_dir, message, system_prompt, session_id, add_dirs):
         try:

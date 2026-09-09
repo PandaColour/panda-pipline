@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pipeline
+import config
 import static_scan
 from config import SYSTEM_PROMPT_DIR
 from pipeline import Pipeline
@@ -39,7 +40,7 @@ class PipelinePathTests(unittest.TestCase):
 
             developer = MagicMock()
             code_reviewer = MagicMock()
-            code_reviewer.send_message.return_value = "任务完成"
+            code_reviewer.send_message.return_value = 'FINAL_ANSWER {"status": "approved", "approval_token": "任务完成", "summary": "任务完成", "outputs": {}}'
 
             agents = {
                 "代码开发": developer,
@@ -58,8 +59,8 @@ class PipelinePathTests(unittest.TestCase):
             self.assertEqual(
                 created,
                 [
-                    ("代码开发", "code_developer.md"),
-                    ("代码验证审查", "code_reviewer.md"),
+                    ("代码开发", "code_developer.md", "developer"),
+                    ("代码验证审查", "code_reviewer.md", "code_reviewer"),
                 ],
             )
             self.assertTrue(Path(pipeline.requirement_dir).is_dir())
@@ -76,18 +77,27 @@ class PipelinePathTests(unittest.TestCase):
             self.assertIn(pipeline.test_report_file, reviewer_prompt)
             self.assertIn("执行必要测试", reviewer_prompt)
 
-    def test_create_agent_always_uses_pipeline_root(self):
+    def test_create_agent_uses_pipeline_root_and_configured_role(self):
         pipeline = Pipeline("relative-workspace")
 
-        with patch.object(pipeline, "_agent_status", return_value="开发中") as agent_status, \
+        with patch.object(
+                config,
+                "AGENT_TYPES",
+                [{"role": "requirements_analyst", "agent_type": "claude"}],
+        ), \
+                patch.object(pipeline, "_agent_status", return_value="开发中") as agent_status, \
                 patch("pipeline.Agent") as agent_class:
-            created = pipeline._create_agent("需求分析", "requirements_analyst.md")
+            created = pipeline._create_agent(
+                "需求分析",
+                "requirements_analyst.md",
+                "requirements_analyst",
+            )
 
         self.assertIsNotNone(created)
         call = agent_class.call_args
         self.assertEqual(call.args, ("需求分析", "requirements_analyst.md", pipeline.work_dir))
         self.assertEqual(call.kwargs["add_dirs"], None)
-        self.assertEqual(call.kwargs["agent_type"], "cursor")
+        self.assertEqual(call.kwargs["agent_type"], "claude")
         self.assertEqual(call.kwargs["prompt_dir"], pipeline.prompt_dir)
         self.assertEqual(call.kwargs["status_provider"](), "开发中")
         agent_status.assert_called_once_with()
@@ -110,6 +120,23 @@ class PipelinePathTests(unittest.TestCase):
         self.assertIn("为后续需求提供代码索引", content)
         self.assertIn("当前源码", content)
         self.assertIn("长期 memory 不得写入 R-xxx", content)
+
+    def test_requirement_summary_prompt_requires_auditable_full_log_summary(self):
+        template = Path(__file__).resolve().parents[1] / "break-system-prompt" / "requirement_summary.md"
+
+        self.assertTrue(template.is_file())
+        content = template.read_text(encoding="utf-8")
+        for expected in (
+            "requirements/requirement_summary.md",
+            "整个 `requirements/`",
+            "实现状态",
+            "文档冲突",
+            "文档缺失",
+            "Agent 自主决策",
+            "实现证据",
+            "不得修改 memory/",
+        ):
+            self.assertIn(expected, content)
 
     def test_final_reflection_renders_system_prompt_template(self):
         with tempfile.TemporaryDirectory() as work_dir, tempfile.TemporaryDirectory() as prompt_dir:
@@ -166,7 +193,7 @@ class PipelinePathTests(unittest.TestCase):
             analyst = MagicMock()
             analyst.display_name = "需求分析agent(cursor)"
             reviewer = MagicMock()
-            reviewer.send_message.return_value = "同意方案"
+            reviewer.send_message.return_value = 'FINAL_ANSWER {"status": "approved", "approval_token": "同意方案", "summary": "同意方案", "outputs": {}}'
             agents = {"需求分析": analyst, "需求审查": reviewer}
             created = []
 
@@ -181,35 +208,24 @@ class PipelinePathTests(unittest.TestCase):
             self.assertEqual(
                 created,
                 [
-                    ("需求分析", "requirements_analyst.md"),
-                    ("需求审查", "requirements_reviewer.md"),
+                    ("需求分析", "requirements_analyst.md", "requirements_analyst"),
+                    ("需求审查", "requirements_reviewer.md", "requirements_reviewer"),
                 ],
             )
             self.assertTrue(Path(pipeline.requirement_dir).is_dir())
 
-    def test_requirement_review_auto_passes_after_three_failed_agent_reviews(self):
+    def test_requirement_review_stops_after_ten_malformed_replies(self):
         with tempfile.TemporaryDirectory() as work_dir:
-            pipeline = Pipeline(work_dir)
-            analyst = MagicMock()
-            analyst.display_name = "需求分析agent(cursor)"
-            reviewer = MagicMock()
-            reviewer.send_message.side_effect = ["缺少范围", "仍缺少验收", "还不完整"]
-            agents = {"需求分析": analyst, "需求审查": reviewer}
-
-            with patch.object(pipeline, "_create_agent", side_effect=lambda name, prompt: agents[name]), \
-                    patch("pipeline.human_gate", return_value=None) as gate:
-                pipeline._run_stage_1_requirements("new project")
-
-            self.assertEqual(reviewer.send_message.call_count, 3)
-            self.assertEqual(analyst.send_message.call_count, 3)
-            self.assertIn("缺少范围", analyst.send_message.call_args_list[1].args[0])
-            self.assertIn("仍缺少验收", analyst.send_message.call_args_list[2].args[0])
-            gate.assert_called_once_with(
-                "1. 需求分析",
-                pipeline.user_requirements_file,
-                skip_human=False,
-                feedback_target="需求分析agent(cursor)",
-            )
+            target = Pipeline(work_dir)
+            analyst, reviewer = MagicMock(), MagicMock()
+            reviewer.send_message.return_value = 'not a receipt'
+            with patch.object(target, '_create_agent', side_effect=[analyst, reviewer]), patch('pipeline.human_gate') as gate:
+                self.assertFalse(target._run_stage_1_requirements('new project'))
+            self.assertEqual(reviewer.send_message.call_count, 10)
+            self.assertEqual(analyst.send_message.call_count, 1)
+            gate.assert_not_called()
+            target._ensure_execution_plan()
+            self.assertEqual(target.execution_plan.get_stage_attempt('requirements_review', 'R-001'), 10)
 
     def test_ensure_execution_plan_creates_single_requirement_under_requirements(self):
         with tempfile.TemporaryDirectory() as work_dir:
@@ -233,13 +249,13 @@ class PipelinePathTests(unittest.TestCase):
             pipeline._set_status("代码评审中")
             developer = MagicMock()
             code_reviewer = MagicMock()
-            code_reviewer.send_message.return_value = "任务完成"
+            code_reviewer.send_message.return_value = 'FINAL_ANSWER {"status": "approved", "approval_token": "任务完成", "summary": "任务完成", "outputs": {}}'
             agents = {
                 "代码开发": developer,
                 "代码验证审查": code_reviewer,
             }
 
-            with patch.object(pipeline, "_create_agent", side_effect=lambda name, prompt: agents[name]), \
+            with patch.object(pipeline, "_create_agent", side_effect=lambda name, _prompt, _role: agents[name]), \
                     patch("pipeline.human_gate", return_value=None):
                 pipeline._run_stage_2_development()
 
@@ -256,13 +272,13 @@ class PipelinePathTests(unittest.TestCase):
             pipeline = Pipeline(work_dir)
             developer = MagicMock()
             code_reviewer = MagicMock()
-            code_reviewer.send_message.return_value = "任务完成"
+            code_reviewer.send_message.return_value = 'FINAL_ANSWER {"status": "approved", "approval_token": "任务完成", "summary": "任务完成", "outputs": {}}'
             agents = {
                 "代码开发": developer,
                 "代码验证审查": code_reviewer,
             }
 
-            with patch.object(pipeline, "_create_agent", side_effect=lambda name, prompt: agents[name]), \
+            with patch.object(pipeline, "_create_agent", side_effect=lambda name, _prompt, _role: agents[name]), \
                     patch.object(pipeline, "_run_static_scan"), \
                     patch("pipeline.human_gate", return_value=None):
                 pipeline._run_stage_2_development()
@@ -276,7 +292,7 @@ class PipelinePathTests(unittest.TestCase):
             pipeline._ensure_execution_plan("new project")
             developer = MagicMock()
             code_reviewer = MagicMock()
-            code_reviewer.send_message.return_value = "任务完成"
+            code_reviewer.send_message.return_value = 'FINAL_ANSWER {"status": "approved", "approval_token": "任务完成", "summary": "任务完成", "outputs": {}}'
             agents = {
                 "代码开发": developer,
                 "代码验证审查": code_reviewer,
@@ -288,7 +304,7 @@ class PipelinePathTests(unittest.TestCase):
                 statuses.append(status)
                 original_set_status(status)
 
-            with patch.object(pipeline, "_create_agent", side_effect=lambda name, prompt: agents[name]), \
+            with patch.object(pipeline, "_create_agent", side_effect=lambda name, _prompt, _role: agents[name]), \
                     patch.object(pipeline, "_set_status", side_effect=recording_set_status), \
                     patch.object(pipeline, "_run_static_scan"), \
                     patch("pipeline.human_gate", return_value=None):
@@ -304,13 +320,13 @@ class PipelinePathTests(unittest.TestCase):
             pipeline._set_status("静态扫描中")
             developer = MagicMock()
             code_reviewer = MagicMock()
-            code_reviewer.send_message.return_value = "任务完成"
+            code_reviewer.send_message.return_value = 'FINAL_ANSWER {"status": "approved", "approval_token": "任务完成", "summary": "任务完成", "outputs": {}}'
             agents = {
                 "代码开发": developer,
                 "代码验证审查": code_reviewer,
             }
 
-            with patch.object(pipeline, "_create_agent", side_effect=lambda name, prompt: agents[name]), \
+            with patch.object(pipeline, "_create_agent", side_effect=lambda name, _prompt, _role: agents[name]), \
                     patch.object(pipeline, "_run_static_scan") as scan, \
                     patch("pipeline.human_gate", return_value=None):
                 pipeline._run_stage_2_development()
@@ -329,13 +345,13 @@ class PipelinePathTests(unittest.TestCase):
                 report_file.write("# 代码静态扫描报告\n")
             developer = MagicMock()
             code_reviewer = MagicMock()
-            code_reviewer.send_message.return_value = "任务完成"
+            code_reviewer.send_message.return_value = 'FINAL_ANSWER {"status": "approved", "approval_token": "任务完成", "summary": "任务完成", "outputs": {}}'
             agents = {
                 "代码开发": developer,
                 "代码验证审查": code_reviewer,
             }
 
-            with patch.object(pipeline, "_create_agent", side_effect=lambda name, prompt: agents[name]), \
+            with patch.object(pipeline, "_create_agent", side_effect=lambda name, _prompt, _role: agents[name]), \
                     patch.object(pipeline, "_run_static_scan") as scan, \
                     patch("pipeline.human_gate", return_value=None):
                 pipeline._run_stage_2_development()
@@ -350,13 +366,13 @@ class PipelinePathTests(unittest.TestCase):
             pipeline._set_status("代码评审中")
             developer = MagicMock()
             code_reviewer = MagicMock()
-            code_reviewer.send_message.return_value = "任务完成"
+            code_reviewer.send_message.return_value = 'FINAL_ANSWER {"status": "approved", "approval_token": "任务完成", "summary": "任务完成", "outputs": {}}'
             agents = {
                 "代码开发": developer,
                 "代码验证审查": code_reviewer,
             }
 
-            with patch.object(pipeline, "_create_agent", side_effect=lambda name, prompt: agents[name]), \
+            with patch.object(pipeline, "_create_agent", side_effect=lambda name, _prompt, _role: agents[name]), \
                     patch.object(pipeline, "_run_static_scan") as scan, \
                     patch("pipeline.human_gate", return_value=None):
                 pipeline._run_stage_2_development()

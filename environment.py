@@ -4,11 +4,8 @@ import os
 import shutil
 import subprocess
 
+from config import PROJECT_ROOT, REPOS
 
-PROJECT_ROOT = r"/Users/panda.colour/Company/android-wwl1b"
-REPOS = [
-    ("https://gitee.com/pandacolour/aiphone.git", "android-tecp")
-]
 
 DEFAULT_MEMORY_FILENAME = "loan_pipeline_default.md"
 DEFAULT_MEMORY_SOURCE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "default-memory")
@@ -32,7 +29,7 @@ def _repo_target_path(repo_url):
 
 def _resolve_agent_work_dir():
     if len(REPOS) == 1:
-        return _repo_target_path(REPOS[0][0])
+        return _repo_target_path(REPOS[0]["url"])
     return PROJECT_ROOT
 
 
@@ -256,7 +253,9 @@ def _prepare_codegraph(work_dir):
 def setup_environment():
     os.makedirs(PROJECT_ROOT, exist_ok=True)
     _install_static_analysis_tools()
-    for repo_url, branch in REPOS:
+    for repo in REPOS:
+        repo_url = repo["url"]
+        branch = repo["branch"]
         _clone_or_pull(repo_url, branch, _repo_target_path(repo_url))
     work_dir = _resolve_agent_work_dir()
     _prepare_codegraph(work_dir)

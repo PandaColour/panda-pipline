@@ -4,11 +4,16 @@ import unittest
 from unittest.mock import patch
 
 import break_main
+import config
 import environment
 import main
 
 
 class EnvironmentModuleTests(unittest.TestCase):
+    def test_environment_exposes_json_config_repository_settings(self):
+        self.assertEqual(environment.PROJECT_ROOT, config.PROJECT_ROOT)
+        self.assertIs(environment.REPOS, config.REPOS)
+
     def test_entry_points_use_the_independent_environment_module(self):
         self.assertIs(break_main.setup_environment, environment.setup_environment)
         self.assertIs(main.setup_environment, environment.setup_environment)
@@ -26,7 +31,7 @@ class EnvironmentModuleTests(unittest.TestCase):
                 os.makedirs(cloned_path, exist_ok=True)
 
             with patch.object(environment, "PROJECT_ROOT", project_root), \
-                    patch.object(environment, "REPOS", [(repo_url, "main")]), \
+                    patch.object(environment, "REPOS", [{"url": repo_url, "branch": "main"}]), \
                     patch.object(environment, "DEFAULT_MEMORY_SOURCE_DIR", source_dir), \
                     patch.object(environment, "_install_static_analysis_tools"), \
                     patch.object(environment, "_prepare_codegraph") as prepare_codegraph, \
@@ -51,7 +56,7 @@ class EnvironmentModuleTests(unittest.TestCase):
             target_path = os.path.join(project_root, "lending-app")
 
             with patch.object(environment, "PROJECT_ROOT", project_root), \
-                    patch.object(environment, "REPOS", [(repo_url, "main")]), \
+                    patch.object(environment, "REPOS", [{"url": repo_url, "branch": "main"}]), \
                     patch.object(environment, "_install_static_analysis_tools"), \
                     patch.object(environment, "_clone_or_pull"), \
                     patch.object(environment, "_prepare_codegraph") as prepare_codegraph, \

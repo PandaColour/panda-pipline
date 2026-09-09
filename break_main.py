@@ -6,6 +6,7 @@ import sys
 
 from break_pipeline import BreakPipeline
 from environment import setup_environment
+from task_protocol import ReceiptPending
 
 EXIT_COMMANDS = {"q", "quit", "exit"}
 
@@ -31,6 +32,13 @@ def _read_user_requirement(first_round):
 
 
 def main(argv=None):
+    try:
+        return _main(argv)
+    except ReceiptPending as error:
+        print(f'⚠️ {error}\n已保留当前阶段并正常停止；再次启动将只补正该任务回执。')
+
+
+def _main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--skipHuman", action="store_true", help="人工审核卡点自动按 Enter 通过")
     args = parser.parse_args([] if argv is None else argv)
@@ -48,7 +56,8 @@ def main(argv=None):
     if any(os.path.isfile(path) for path in resume_artifacts):
         pipeline = BreakPipeline(work_dir, **pipeline_options)
         if pipeline.has_resumable_state():
-            pipeline.run(None)
+            if pipeline.run(None) is False:
+                return
             first_round = False
         else:
             pipeline = None
@@ -58,7 +67,8 @@ def main(argv=None):
             break
         if pipeline is None:
             pipeline = BreakPipeline(work_dir, **pipeline_options)
-        pipeline.run(user_idea)
+        if pipeline.run(user_idea) is False:
+            return
         pipeline = None
         first_round = False
 
