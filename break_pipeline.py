@@ -415,9 +415,12 @@ class BreakPipeline(PipelineTaskMixin):
         if resume_existing_index:
             user_idea = "已有拆分产物；请在不重置已写内容的前提下完成恢复审查。"
             if self._pending_receipt('breakdown', None):
-                initial_breakdown_message = '恢复拆分阶段待补正的回执。'
+                initial_breakdown_message = '恢复拆分阶段未完成的调用。'
         elif user_idea is None:
-            user_idea = input("\n🎯 请输入总体开发需求描述:\n> ")
+            if self._pending_receipt('breakdown', None):
+                user_idea = self.execution_plan.read().get('demand', {}).get('source')
+            if user_idea is None:
+                user_idea = input("\n🎯 请输入总体开发需求描述:\n> ")
         if has_existing_index:
             self._set_demand_status("拆分中", source=user_idea)
             if not resume_existing_index:
@@ -446,8 +449,8 @@ class BreakPipeline(PipelineTaskMixin):
                     return False
                 attempt = self.execution_plan.increment_stage_attempt("breakdown_review")
                 review = self._send_task(reviewer, f"请审查拆分产物 {self.requirements_index_file} 及目录 {self.requirements_dir}，原始需求：{self._handoff('user_idea', user_idea)}。"
-                    f"通过时在 FINAL_ANSWER JSON 中输出 status=approved；否则输出 changes_requested 和可执行修改意见。"
-                    f"本阶段最多评审 {MAX_STAGE_ATTEMPTS} 次；达到上限仍未通过则暂停，不批准拆分。", 'breakdown_review')
+                    f"只读核对 {self.requirements_dir}/shared_context.md 的公共能力与复用边界；本阶段核对规划、依赖和契约责任，不提前要求开发交接记录或实现结果。"
+                    f"通过时在 FINAL_ANSWER JSON 中输出 status=approved；否则输出 changes_requested 和可执行修改意见。", 'breakdown_review')
                 if review.startswith(CALL_FAILURE):
                     if attempt >= MAX_STAGE_ATTEMPTS:
                         self._exhaust_stage(None, '拆分评审中', review)
@@ -473,8 +476,11 @@ class BreakPipeline(PipelineTaskMixin):
     def _breakdown_instruction(self, user_idea):
         return (
             f"请将以下大需求拆分为简单、可实现、可验证且有依赖顺序的小需求。"
-            f"创建 {self.requirements_index_file} 及 {self.requirements_dir}/001-<short-name>.md 等独立文件；"
+            f"创建 {self.requirements_index_file} 及 {self.requirements_dir}/R-xxx-<short-name>/user_requirements.md 等独立需求文件；"
             "必须写入状态、前置依赖、范围、验收标准、风险。"
+            "交付目标与技术栈以原始需求和仓库事实为准；专项平台与工具只按适用性选用，不把提示词示例当支持范围或默认目标。"
+            f"在 {self.requirements_dir}/shared_context.md 架构章节建立公共能力与复用边界表，明确提供方、入口、已有/未实现范围、消费方接入责任及状态/证据；跨需求契约按字段/方法明确公共与业务归属。"
+            f"仅在共享上下文注明 {self.requirements_dir}/develop_urge.md 的路径和用途：由 Developer 首次产生本轮跨小需求事项时创建，随本轮目录归档；本阶段不创建、读取、维护或验收该文件。"
             "每个小需求的 `user_requirements.md` 都必须包含“全局上下文”小节，"
             "传递客户原始需求摘要、适用业务场景、测试环境、账号、密码、凭据、接口地址、物料/Figma 等跨需求信息；"
             "测试环境、账号、密码等验证信息必须从原始需求保留到需要联调或验证的小需求中，不得只放在父需求或索引里。"
@@ -486,6 +492,7 @@ class BreakPipeline(PipelineTaskMixin):
             f"收到新的需求或补充说明：{self._handoff('user_idea', user_idea)}。"
             f"请阅读并保留现有拆分产物 {self.requirements_index_file} 及 {self.requirements_dir} 下各需求文件，"
             f"只做与本次输入相关的增量调整；必要时新增、拆分或更新小需求，并保持依赖顺序、状态、范围、验收标准和风险一致。"
+            f"同步增量更新 {self.requirements_dir}/shared_context.md 的能力归属；保留未受影响的本轮证据，责任/契约变更时记录依据及影响，不替开发阶段维护交接清单或宣称接入已验证。"
             "若补充说明包含客户原始需求、测试环境、账号、密码、凭据、接口地址、物料/Figma 等跨需求信息，"
             "必须同步更新每个受影响小需求 `user_requirements.md` 的“全局上下文”小节，不得只写在索引或父级说明中。"
             f"返回前确认 {self.requirements_index_file} 和相关需求文件已更新。"
@@ -579,6 +586,8 @@ class BreakPipeline(PipelineTaskMixin):
             self._set_status(item.requirement_id, "需求分析中")
             analysis_message = (
                 f"只分析当前需求 {item.requirement_id}。阅读 {requirement_file}，补全范围、影响、边界、异常、验收标准、依赖和风险；将分析结果写入 {analysis_report}，不得覆盖拆分需求文件或修改其他需求。"
+                f"直接依赖 ID：{item.dependencies}。只读 {self.requirements_dir}/shared_context.md 的公共能力表；若本轮 {self.requirements_dir}/develop_urge.md 已存在，再读取当前接收方条目。按需定位本轮依赖报告与源码，明确已有能力、本项接入动作和最终字段/调用验证；不重读全部上游全文。"
+                "交接文件尚未创建是正常情况，按依赖文档与源码继续分析；在当前分析报告写清接入责任，不要求补空文件、不修改共享文件或从归档目录恢复清单。"
             )
             feedback = self._pending_feedback_message(item.requirement_id)
             if feedback:
@@ -596,6 +605,7 @@ class BreakPipeline(PipelineTaskMixin):
                     "requirements_review", item.requirement_id
                 )
                 review = self._send_task(reviewer, f"只评审当前需求 {item.requirement_id}。阅读 {requirement_file} 和 {analysis_report}，将结论写入 {review_report}。通过时在 FINAL_ANSWER JSON 中输出 status=approved；否则输出 changes_requested 和具体修改意见。"
+                    f"直接依赖 ID：{item.dependencies}。只读 {self.requirements_dir}/shared_context.md，及本轮已存在时的 {self.requirements_dir}/develop_urge.md 相关条目，核实分析完整承接原始 AC 的步骤、字段/回调和验证方法；清单未创建时按依赖证据核对，不要求补文件，不提前要求实现结果、不关闭交接项，复审只查既有问题与直接影响项。"
                     + self._continuation_context(item) + STAGE_RESULT_INSTRUCTION, 'requirements_review', item)
                 if review.startswith(CALL_FAILURE):
                     if attempt >= MAX_STAGE_ATTEMPTS:
@@ -610,7 +620,9 @@ class BreakPipeline(PipelineTaskMixin):
                     return
                 self._set_pending_feedback(item.requirement_id, "requirement_review", "需求评审中", review)
                 self._set_status(item.requirement_id, "需求分析中")
-                response = self._send_task(analyst, f"当前需求 {item.requirement_id} 的需求评审意见：{self._handoff('review', review)}\n请仅修订当前需求文档。" + self._continuation_context(item) + STAGE_RESULT_INSTRUCTION, 'analysis', item)
+                response = self._send_task(analyst, f"当前需求 {item.requirement_id} 的需求评审意见：{self._handoff('review', review)}\n请仅修订当前需求文档。"
+                    f"直接依赖 ID：{item.dependencies}；按问题定点只读 {self.requirements_dir}/shared_context.md、本轮已存在时的 {self.requirements_dir}/develop_urge.md 及依赖证据，更新本项接入与验证方案，不因清单未创建要求补文件，不修改共享文件或重查无关依赖。"
+                    + self._continuation_context(item) + STAGE_RESULT_INSTRUCTION, 'analysis', item)
                 response = self._normalize_item_response(item, '需求分析中', response)
                 self._clear_pending_feedback(item.requirement_id)
                 self._set_status(item.requirement_id, "需求评审中")
@@ -666,7 +678,9 @@ class BreakPipeline(PipelineTaskMixin):
             self._set_status(item.requirement_id, "开发中")
             initial_message = (
                 f"只实现当前需求 {item.requirement_id}。阅读 {requirement_file} 和 {analysis_report}。"
+                f"直接依赖 ID：{item.dependencies}。先读 {self.requirements_dir}/shared_context.md 的公共能力与复用边界；若本轮 {self.requirements_dir}/develop_urge.md 已存在，再读本项接收的交接。允许定点只读本轮依赖报告与源码，文件未创建时也须核实已有能力并完成当前 AC 的接入。"
                 f"允许进行必要自测，并将自测命令和结果写入 {develop_report}。完成后写 {develop_report}。"
+                f"仅按角色协议更新 {self.requirements_dir}/shared_context.md 本轮有关能力条目；首次产生本轮跨小需求事项时创建 {self.requirements_dir}/develop_urge.md，已有文件仅更新本项来源/接收条目。无交接事项不创建空文件，不恢复归档清单；完成接入后标待验证，不自行标已验证，不等待记忆整理才交接。"
                 "不得实现其他需求，也不要修改 requirements/index.md。"
             )
             feedback = self._pending_feedback_message(item.requirement_id)
@@ -684,6 +698,8 @@ class BreakPipeline(PipelineTaskMixin):
             else:
                 attempt = self.execution_plan.increment_stage_attempt("code_review", item.requirement_id)
                 review = self._send_task(reviewer, f"只验证并审查当前需求 {item.requirement_id}。按本轮调度模式核对 {requirement_file}、{analysis_report}、{develop_report} 和相关代码、测试。"
+                    f"直接依赖 ID：{item.dependencies}。读取 {self.requirements_dir}/shared_context.md，及本轮已存在时的 {self.requirements_dir}/develop_urge.md 本项相关记录；无跨项事项不要求补空文件，仍核验原始 AC 对应的实际接入、最终字段/请求与结果证据，清单未列出不豁免原始 AC。"
+                    "仅按角色协议更新已核验公共能力的状态/证据和接收方为当前项的交接状态/证据，不关闭未来项；复审只重验既有问题、直接影响项及失效证据。"
                     f"在本轮范围内执行必要测试并写 {test_report}；发现缺陷时写 {paths['bug']}。"
                     f"将审查结论写入 {review_report}。通过时在 FINAL_ANSWER JSON 中输出 status=approved；否则输出 changes_requested 和当前项的具体修改意见。"
                     "若目标为 android:runnable，核对 Developer 的实际设备验证、AVD 准备尝试、硬超时及启停清理证据；缺口交回 Developer 补验，不能只因 adb 列表为空判不可用。"
@@ -706,7 +722,9 @@ class BreakPipeline(PipelineTaskMixin):
             if not self._review_passed(review):
                 self._set_pending_feedback(item.requirement_id, "code_review", "代码评审中", review)
                 self._set_status(item.requirement_id, "开发中")
-                response = self._send_task(developer, f"当前需求 {item.requirement_id} 的代码审查意见：{self._handoff('review', review)}\n请仅修正当前项。" + DEVELOPMENT_HANDOFF + self._continuation_context(item) + STAGE_RESULT_INSTRUCTION, 'development', item)
+                response = self._send_task(developer, f"当前需求 {item.requirement_id} 的代码审查意见：{self._handoff('review', review)}\n请仅修正当前项。"
+                    f"直接依赖 ID：{item.dependencies}；按问题定点读取 {self.requirements_dir}/shared_context.md、本轮已存在时的 {self.requirements_dir}/develop_urge.md 及依赖证据，仅更新本轮有关能力/交接条目和实现证据；首次确有跨小需求事项时才创建清单，接入待 Reviewer 验证，不重置无关项或恢复归档待办。"
+                    + DEVELOPMENT_HANDOFF + self._continuation_context(item) + STAGE_RESULT_INSTRUCTION, 'development', item)
                 response = self._normalize_item_response(item, '开发中', response)
                 review_context.record_development(response)
                 self._clear_pending_feedback(item.requirement_id)
@@ -943,6 +961,12 @@ class BreakPipeline(PipelineTaskMixin):
             f"requirements 目录为 {self.requirements_dir}；当前 index.md 的 SHA-256 为 {source_hash}。"
             "只写 execution_plan.json，不得修改 index.md 或任何需求、报告、源码文件。", 'normalize')
         if previous_plan is not None:
+            # Keep this normalizer invocation's counters/history when merging
+            # the pre-normalization snapshot back into the generated plan.
+            current_demand = self.execution_plan.read().get('demand', {})
+            for field in ('stage_attempts', 'attempt_history'):
+                if 'normalize' in current_demand.get(field, {}):
+                    previous_plan.setdefault('demand', {}).setdefault(field, {})['normalize'] = current_demand[field]['normalize']
             # This receipt was just recovered; do not resurrect it while
             # preserving unrelated progress from before normalization.
             previous_plan.get('demand', {}).get('pending_receipts', {}).pop('normalize', None)

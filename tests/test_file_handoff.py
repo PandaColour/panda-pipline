@@ -10,6 +10,56 @@ from break_pipeline import BreakPipeline
 
 
 class FileHandoffTests(unittest.TestCase):
+    def test_breakdown_failure_before_index_resumes_without_user_input(self):
+        from unittest.mock import patch
+        from task_protocol import TaskRetryRequired
+        with tempfile.TemporaryDirectory() as root:
+            pipeline = BreakPipeline(root)
+            breaker = MagicMock()
+            breaker.send_message.side_effect = RuntimeError('network timeout')
+            reviewer = MagicMock()
+            with patch.object(pipeline, '_create_agent', side_effect=[breaker, reviewer]), self.assertRaises(TaskRetryRequired):
+                pipeline._run_breakdown('原始需求')
+            self.assertFalse(Path(pipeline.requirements_index_file).exists())
+            restarted = BreakPipeline(root)
+            with patch.object(restarted, '_create_agent', side_effect=[breaker, reviewer]), \
+                    patch('builtins.input', side_effect=AssertionError('不应重新询问需求')), \
+                    self.assertRaises(TaskRetryRequired):
+                restarted._run_breakdown()
+            self.assertEqual(restarted.execution_plan.get_stage_attempt('breakdown'), 2)
+            self.assertEqual(restarted.execution_plan.read()['demand']['source'], '原始需求')
+            reviewer.send_message.assert_not_called()
+
+    def test_producer_execution_failure_counts_once_and_resumes_original_work(self):
+        from task_protocol import TaskRetryRequired, TaskMessage
+        for stage in ('analysis', 'development', 'breakdown', 'normalize', 'memory_analysis', 'memory_development', 'summary'):
+            with self.subTest(stage=stage), tempfile.TemporaryDirectory() as root:
+                pipeline = self.pipeline_fixture(root)
+                item = None if stage in ('breakdown', 'normalize', 'summary') else pipeline._load_items()[0]
+                rid = item.requirement_id if item else None
+                agent = MagicMock()
+                agent.send_message.side_effect = RuntimeError('HTTP/2 keepalive ping timed out')
+                with self.assertRaises(TaskRetryRequired):
+                    pipeline._send_task(agent, '完成原始业务任务', stage, item)
+                agent.send_message.assert_called_once()
+                self.assertEqual(pipeline.execution_plan.get_stage_attempt(stage, rid), 1)
+                state = pipeline.execution_plan._agent_session_target(pipeline.execution_plan.read(), rid)
+                self.assertEqual(state['attempt_history'][stage][0]['kind'], 'network_error')
+                self.assertEqual(state['pending_receipts'][stage]['mode'], 'execution')
+                task_path = state['pending_receipts'][stage]['task_path']
+                self.assertIn('完成原始业务任务', Path(task_path).read_text())
+                restarted = BreakPipeline(root)
+                agent.send_message.reset_mock(side_effect=True)
+                agent.send_message.return_value = 'FINAL_ANSWER {"status":"completed","summary":"done","outputs":{}}'
+                restarted._send_task(agent, '恢复入口的简短说明', stage, item)
+                task = agent.send_message.call_args.args[0]
+                self.assertIsInstance(task, TaskMessage)
+                self.assertIn(task_path, task)
+                self.assertIn('继续未完成', task)
+                self.assertNotIn('仅根据调用日志', task)
+                self.assertEqual(restarted.execution_plan.get_stage_attempt(stage, rid), 2)
+                self.assertIsNone(restarted._pending_receipt(stage, rid))
+
     def test_receipt_status_is_independent_of_optional_approval_description(self):
         from task_protocol import TaskMessage, validate_receipt, parse_final_answer, ReceiptError
         from review_decision import structured_review_decision
@@ -72,7 +122,7 @@ class FileHandoffTests(unittest.TestCase):
                 validate_receipt('写入报告。' + receipt + suffix, task, '.')
 
     def test_producer_correction_failure_is_persisted_and_resumes_without_development(self):
-        from task_protocol import ReceiptError, ReceiptPending
+        from task_protocol import ReceiptError, ReceiptPending, TaskRetryRequired
         for failure in (ReceiptError('缺少 FINAL_ANSWER'), RuntimeError('network timeout')):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as root:
                 pipeline = self.pipeline_fixture(root)
@@ -85,18 +135,19 @@ class FileHandoffTests(unittest.TestCase):
                 dev.send_message.side_effect = [ReceiptError('缺少 FINAL_ANSWER'), failure]
                 with self.assertRaises(ReceiptPending):
                     pipeline._send_task(dev, '实现登录', 'development', item)
-                self.assertEqual(dev.send_message.call_count, 2)
-                self.assertIn('缺少 FINAL_ANSWER', dev.send_message.call_args.args[0])
+                self.assertEqual(dev.send_message.call_count, 1)
+                self.assertEqual(pipeline.execution_plan.get_stage_attempt("development", "R-001"), 1)
                 state = pipeline.execution_plan.read()['items'][0]
                 self.assertEqual(state['status'], '开发中')
                 self.assertEqual(state['pending_receipts']['development']['log_path'], str(original_log))
                 restarted = BreakPipeline(root)
                 dev.send_message.reset_mock(side_effect=True)
-                dev.send_message.side_effect = RuntimeError('network timeout again')
-                with self.assertRaises(ReceiptPending):
+                dev.send_message.side_effect = failure
+                with self.assertRaises(TaskRetryRequired):
                     restarted._send_task(dev, '实现登录', 'development', restarted._load_items()[0])
                 dev.send_message.assert_called_once()
-                self.assertIn(str(failure), dev.send_message.call_args.args[0])
+                self.assertIn('缺少 FINAL_ANSWER', dev.send_message.call_args.args[0])
+                self.assertEqual(restarted.execution_plan.get_stage_attempt('development', 'R-001'), 2)
                 self.assertEqual(restarted.execution_plan.read()['items'][0]['pending_receipts']['development']['log_path'], str(original_log))
                 dev.send_message.reset_mock(side_effect=True)
                 dev.send_message.return_value = 'FINAL_ANSWER {"status":"completed","approval_token":"","summary":"done","outputs":{}}'
@@ -127,7 +178,7 @@ class FileHandoffTests(unittest.TestCase):
             with self.assertRaises(ReceiptPending):
                 pipeline._run_item(item, dev, reviewer)
             reviewer.send_message.assert_not_called()
-            self.assertEqual(dev.agent_impl.run.call_count, 2)
+            self.assertEqual(dev.agent_impl.run.call_count, 1)
             restarted = BreakPipeline(root, skip_human=True)
             dev.agent_impl.run.reset_mock()
             dev.agent_impl.run.return_value = AgentRunResult('报告已写入。FINAL_ANSWER\n' + json.dumps(dict(
@@ -181,6 +232,7 @@ class FileHandoffTests(unittest.TestCase):
         return pipeline
 
     def test_all_failed_invocations_exhaust_budget_without_developer_rework(self):
+        from task_protocol import TaskRetryRequired
         for failure in (RuntimeError('[Errno 7] Argument list too long'), RuntimeError('network connection failed'), ''):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as root:
                 pipeline = self.pipeline_fixture(root)
@@ -189,6 +241,12 @@ class FileHandoffTests(unittest.TestCase):
                     reviewer.send_message.side_effect = failure
                 else:
                     reviewer.send_message.return_value = failure
+                for expected in range(1, 11):
+                    with self.assertRaises(TaskRetryRequired):
+                        pipeline._run_item(pipeline._load_items()[0], dev, reviewer)
+                    self.assertEqual(reviewer.send_message.call_count, expected)
+                    self.assertEqual(pipeline.execution_plan.get_stage_attempt('code_review', 'R-001'), expected)
+                    pipeline = BreakPipeline(root, skip_human=True)
                 pipeline._run_item(pipeline._load_items()[0], dev, reviewer)
                 record = pipeline.execution_plan.read()['items'][0]
                 self.assertEqual(record['stage_attempts']['code_review'], 10)
@@ -203,10 +261,14 @@ class FileHandoffTests(unittest.TestCase):
                 self.assertEqual(reviewer.send_message.call_count, 10)
 
     def test_receipt_correction_is_charged_and_does_not_rerun_review(self):
+        from task_protocol import TaskRetryRequired
         with tempfile.TemporaryDirectory() as root:
             pipeline = self.pipeline_fixture(root, 8)
             dev, reviewer = MagicMock(), MagicMock()
             reviewer.send_message.side_effect = ['broken', 'FINAL_ANSWER {"status":"approved","approval_token":"任务完成","summary":"ok"}']
+            with self.assertRaises(TaskRetryRequired):
+                pipeline._run_item(pipeline._load_items()[0], dev, reviewer)
+            pipeline = BreakPipeline(root, skip_human=True)
             pipeline._run_item(pipeline._load_items()[0], dev, reviewer)
             self.assertIn('本轮为回执补正', reviewer.send_message.call_args.args[0])
             self.assertIn('缺少 FINAL_ANSWER', reviewer.send_message.call_args.args[0])
@@ -214,11 +276,16 @@ class FileHandoffTests(unittest.TestCase):
             dev.send_message.assert_not_called()
 
     def test_correction_survives_network_failure_and_keeps_original_receipt(self):
+        from task_protocol import TaskRetryRequired
         with tempfile.TemporaryDirectory() as root:
             pipeline = self.pipeline_fixture(root, 7)
             dev, reviewer = MagicMock(), MagicMock()
             reviewer.send_message.side_effect = ['broken', RuntimeError('network failure'),
                 'FINAL_ANSWER {"status":"approved","approval_token":"任务完成","summary":"ok"}']
+            for _ in range(2):
+                with self.assertRaises(TaskRetryRequired):
+                    pipeline._run_item(pipeline._load_items()[0], dev, reviewer)
+                pipeline = BreakPipeline(root, skip_human=True)
             pipeline._run_item(pipeline._load_items()[0], dev, reviewer)
             calls = reviewer.send_message.call_args_list
             self.assertIn('本轮为回执补正', calls[1].args[0])

@@ -3,7 +3,7 @@
 import json
 from pathlib import Path
 
-from task_protocol import TaskMessage, ReceiptError, ReceiptPending, parse_final_answer, save_handoff, failure_kind
+from task_protocol import TaskMessage, ReceiptError, ReceiptPending, TaskRetryRequired, parse_final_answer, save_handoff, failure_kind
 
 CALL_FAILURE = 'CALL_FAILURE '
 REVIEW_STAGES = {'code_review', 'requirements_review', 'breakdown_review'}
@@ -89,8 +89,8 @@ class PipelineTaskMixin:
         if item:
             title = f'{item.requirement_id}「{item.name}」：{title}'
         if reviewing:
-            title += f'；第 {round_number} 次调用（失败和回执补正也计数）'
-            instruction += '\n评审只写报告，不修改业务源码。完整问题、稳定 issue ID、证据及修改要求写入审核报告。'
+            title += f'；第 {round_number} 次调用'
+            instruction += '\n评审仅写入角色协议授权的报告/产物及共享条目，不修改业务源码。完整问题、稳定 issue ID、证据及修改要求写入审核报告。'
             correction_source = self._correction_source(stage, rid)
             if correction_source:
                 instruction = ('本轮为回执补正：读取待补正回执的原始调用日志 ' + correction_source
@@ -113,11 +113,12 @@ class PipelineTaskMixin:
             log_path = getattr(agent, 'last_log_path', None)
             if not isinstance(log_path, str):
                 log_path = save_handoff(self.requirements_dir, 'call-error', str(error))
-            if reviewing:
-                kind = failure_kind(error)
-                self._record_attempt(stage, rid, kind, str(error), log_path, outputs=outputs + optional)
-                return CALL_FAILURE + json.dumps(dict(kind=kind, log_path=log_path), ensure_ascii=False)
-            raise
+            kind = failure_kind(error)
+            self._record_attempt(stage, rid, kind, str(error), log_path, outputs=outputs + optional)
+            raise TaskRetryRequired(
+                f'{rid or "总体需求"} / {stage} 第 {round_number} 次调用失败（{kind}）；'
+                f'调用日志：{log_path}；恢复记录：{self.execution_plan_file}'
+            ) from error
 
     def _pending_receipt(self, stage, rid):
         if not Path(self.execution_plan_file).is_file():
@@ -138,34 +139,59 @@ class PipelineTaskMixin:
 
     def _send_producer_task(self, agent, task, stage, rid, title, inputs, outputs, optional, statuses):
         pending = self._pending_receipt(stage, rid)
-        if pending is None:
-            try:
-                return agent.send_message(task)
-            except ReceiptError as error:
-                log_path = getattr(agent, 'last_log_path', None)
-                if not isinstance(log_path, str):
-                    log_path = save_handoff(self.requirements_dir, 'call-error', str(error))
-                pending = dict(log_path=log_path, last_error=str(error),
-                    task_path=save_handoff(self.requirements_dir, 'producer-task', str(task)))
-                # Save before attempting correction: an interrupted correction
-                # must not cause the producer's business work to run again.
-                self._save_pending_receipt(stage, rid, pending)
-        correction = TaskMessage(title + '；回执补正',
-            inputs + [pending['log_path'], pending['task_path']], outputs,
-            '仅根据调用日志和已生成报告重发合规 FINAL_ANSWER，不重新执行本轮业务任务。'
-            '先核对原始任务与必需输出；不得编造完成状态或证据。'
-            '\n上次失败原因：' + str(pending.get('last_error', '见原始调用日志'))[:1000],
-            statuses, root=self.work_dir, optional_outputs=optional)
+        original_task = task
+        if pending:
+            # Legacy records without a mode are receipt-only corrections.
+            resuming_execution = pending.get('mode') == 'execution'
+            instruction = (
+                '上次执行失败。读取原始任务和调用日志，核实已写产物，继续未完成的工作；'
+                '原任务要求仍有效，不重复已完成且有有效证据的工作，不凭日志中的完成声明跳过验收。'
+                if resuming_execution else
+                '仅根据调用日志和已生成报告重发合规 FINAL_ANSWER，不重新执行本轮业务任务。'
+                '先核对原始任务与必需输出；不得编造完成状态或证据。'
+            )
+            task = TaskMessage(title + ('；恢复执行' if resuming_execution else '；回执补正'),
+                inputs + [pending['log_path'], pending['task_path']], outputs,
+                instruction + '\n上次失败原因：' + str(pending.get('last_error', '见原始调用日志'))[:1000],
+                statuses, root=self.work_dir, optional_outputs=optional)
+        if not Path(self.execution_plan_file).is_file():
+            if hasattr(self, 'user_requirements_file'):
+                self._ensure_execution_plan()
+            else:
+                self._set_demand_status('拆分中')
+        attempt = self.execution_plan.increment_stage_attempt(stage, rid)
+        normalization_state = self.execution_plan.read() if stage == 'normalize' else None
         try:
-            response = agent.send_message(correction)
+            response = agent.send_message(task)
         except RuntimeError as error:
-            pending['last_error'] = str(error)
-            pending['last_error_log'] = save_handoff(self.requirements_dir, 'receipt-error', str(error))
+            if normalization_state is not None:
+                self.execution_plan.write(normalization_state)
+            kind = failure_kind(error)
+            log_path = getattr(agent, 'last_log_path', None)
+            if not isinstance(log_path, str):
+                log_path = save_handoff(self.requirements_dir, 'call-error', str(error))
+            if pending is None:
+                pending = dict(log_path=log_path, mode='execution',
+                    task_path=save_handoff(self.requirements_dir, 'producer-task', str(original_task)))
+            if isinstance(error, ReceiptError):
+                pending['mode'] = 'receipt'
+            pending['last_error'] = str(error)[:1000] if isinstance(error, ReceiptError) else kind
+            pending['last_error_log'] = log_path
             self._save_pending_receipt(stage, rid, pending)
-            raise ReceiptPending(
-                f'{rid or "总体需求"} / {stage} 回执补正未完成：{error}。'
-                f'原始调用日志：{pending["log_path"]}；恢复记录：{self.execution_plan_file}'
+            self._record_attempt(stage, rid, kind, str(error), log_path, outputs=outputs + optional)
+            stopped = ReceiptPending if pending.get('mode', 'receipt') == 'receipt' else TaskRetryRequired
+            raise stopped(
+                f'{rid or "总体需求"} / {stage} 第 {attempt} 次调用失败（{kind}）；'
+                f'调用日志：{log_path}；恢复记录：{self.execution_plan_file}'
             ) from error
+        if normalization_state is not None:
+            plan = self.execution_plan.read()
+            self.execution_plan.normalize_plan(plan, None)
+            for field in ('stage_attempts', 'attempt_history', 'pending_receipts'):
+                if field in normalization_state['demand']:
+                    plan['demand'][field] = normalization_state['demand'][field]
+            self.execution_plan.write(plan)
+        self._record_attempt(stage, rid, 'success', str(response), outputs=outputs + optional)
         self._save_pending_receipt(stage, rid, None)
         return response
 

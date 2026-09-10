@@ -33,6 +33,15 @@ class ProgressiveDeliveryTests(unittest.TestCase):
         self.pipeline.execution_plan.write(dict(demand=dict(id='D-001', status='开发中', source='test'),
             source_index_sha256=self.pipeline.execution_plan.index_hash(), items=items))
 
+    def restart_until_complete(self, action):
+        from task_protocol import TaskRetryRequired
+        for _ in range(11):
+            try:
+                return action()
+            except TaskRetryRequired:
+                pass
+        self.fail('Restart loop did not converge within persisted review limit')
+
     def record(self):
         return self.pipeline.execution_plan.read()['items'][0]
 
@@ -62,7 +71,8 @@ class ProgressiveDeliveryTests(unittest.TestCase):
         dev, review = MagicMock(), MagicMock()
         dev.send_message.return_value = 'Mock implemented'
         review.send_message.return_value = BLOCKED
-        self.pipeline._run_item(self.item('代码评审中'), dev, review)
+        item = self.item('代码评审中')
+        self.restart_until_complete(lambda: self.pipeline._run_item(self.pipeline._load_items()[0], dev, review))
         self.assertEqual(review.send_message.call_count, 10)
         self.assertEqual(dev.send_message.call_count, 0)
         self.assertEqual(self.record()['status'], '未通过，跳过执行')
@@ -71,7 +81,8 @@ class ProgressiveDeliveryTests(unittest.TestCase):
     def test_requirements_limit_continues_to_development_without_approval(self):
         analyst, review = MagicMock(), MagicMock()
         review.send_message.return_value = BLOCKED
-        self.pipeline._run_item_requirements(self.item('需求分析中'), analyst, review)
+        self.item('需求分析中')
+        self.restart_until_complete(lambda: self.pipeline._run_item_requirements(self.pipeline._load_items()[0], analyst, review))
         self.assertEqual(self.record()['status'], '待开发')
         self.assertEqual(review.send_message.call_count, 10)
         self.assertIn('requirements_review', self.record()['review_outcomes'])
@@ -121,7 +132,7 @@ class ProgressiveDeliveryTests(unittest.TestCase):
         agents['code_reviewer'].send_message.side_effect = [BLOCKED] * 10 + ['FINAL_ANSWER {"status": "approved", "approval_token": "任务完成", "summary": "任务完成", "outputs": {}}']
         with patch.object(self.pipeline, '_item_agents', return_value=agents), \
                 patch.object(self.pipeline, '_should_save_item_memory', return_value=False):
-            self.assertFalse(self.pipeline._run_execution())
+            self.assertFalse(self.restart_until_complete(self.pipeline._run_execution))
         records = self.pipeline.execution_plan.read()['items']
         self.assertEqual([item['status'] for item in records], ['未通过，跳过执行', '已完成'])
         self.assertEqual(agents['code_reviewer'].send_message.call_count, 11)
@@ -134,7 +145,7 @@ class ProgressiveDeliveryTests(unittest.TestCase):
         agents['code_reviewer'].send_message.return_value = 'FINAL_ANSWER {"status": "approved", "approval_token": "任务完成", "summary": "任务完成", "outputs": {}}'
         with patch.object(self.pipeline, '_item_agents', return_value=agents), \
                 patch.object(self.pipeline, '_should_save_item_memory', return_value=False):
-            self.assertFalse(self.pipeline._run_execution())
+            self.assertFalse(self.restart_until_complete(self.pipeline._run_execution))
         self.assertEqual(agents['developer'].send_message.call_count, 2)
         self.assertEqual(self.pipeline.execution_plan.read()['demand']['status'], '执行结束（有未通过项）')
 

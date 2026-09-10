@@ -6,7 +6,17 @@ import main as normal_main
 
 
 class BreakMainTests(unittest.TestCase):
-    def test_receipt_pending_stops_both_entrypoints_without_crash_or_next_task(self):
+    def test_execution_failure_exits_for_wrapper_restart(self):
+        from task_protocol import TaskRetryRequired
+        for module in (break_main, normal_main):
+            with self.subTest(module=module.__name__), \
+                    patch.object(module, '_main', side_effect=TaskRetryRequired('network_error; example.txt')), \
+                    patch('builtins.print') as printed, self.assertRaises(SystemExit) as stopped:
+                module.main()
+            self.assertEqual(stopped.exception.code, 1)
+            self.assertIn('脚本重新拉起', str(printed.call_args_list))
+
+    def test_receipt_pending_exits_for_wrapper_restart_without_next_task(self):
         from task_protocol import ReceiptPending
         for module, pipeline_name in ((break_main, 'BreakPipeline'), (normal_main, 'Pipeline')):
             for resume in (True, False):
@@ -17,7 +27,9 @@ class BreakMainTests(unittest.TestCase):
                         patch('builtins.input', return_value='需求') as prompt, \
                         patch('builtins.print') as printed:
                     pipeline.return_value.run.side_effect = ReceiptPending('回执待补正：原始日志 example.txt')
-                    module.main()
+                    with self.assertRaises(SystemExit) as stopped:
+                        module.main()
+                    self.assertEqual(stopped.exception.code, 1)
                     pipeline.return_value.run.assert_called_once()
                     self.assertEqual(prompt.call_count, 0 if resume else 1)
                     self.assertIn('example.txt', str(printed.call_args_list))

@@ -270,12 +270,43 @@ class BreakExecutionPlanTests(unittest.TestCase):
         self.assertEqual(saved_plan["demand"]["agent_sessions"]["需求拆分"]["prompt_file"], "requirement_breaker.md")
 
     def test_normalizer_refusal_is_reported_without_masking_it_as_missing_plan(self):
+        from task_protocol import ReceiptError, ReceiptPending
         normalizer = MagicMock()
-        normalizer.send_message.return_value = "索引表缺少可识别的需求条目"
+        normalizer.send_message.side_effect = ReceiptError("索引表缺少可识别的需求条目")
 
         with patch.object(self.pipeline, "_create_agent", return_value=normalizer), \
-                self.assertRaisesRegex(ValueError, "索引表缺少可识别的需求条目"):
+                self.assertRaises(ReceiptPending):
             self.pipeline._ensure_execution_plan()
+        normalizer.send_message.assert_called_once()
+        demand = self.pipeline.execution_plan.read()["demand"]
+        self.assertEqual(demand["stage_attempts"]["normalize"], 1)
+        self.assertIn("索引表缺少可识别的需求条目", demand["pending_receipts"]["normalize"]["last_error"])
+
+    def test_normalizer_rewrite_preserves_failed_and_successful_call_counts(self):
+        from task_protocol import TaskRetryRequired
+        stale_plan = self._demand_plan()
+        stale_plan['source_index_sha256'] = '0' * 64
+        self._write_plan(stale_plan)
+        normalizer = MagicMock()
+
+        def interrupted_rewrite(_task):
+            self._write_plan(self._plan())
+            raise RuntimeError('network timeout')
+
+        normalizer.send_message.side_effect = interrupted_rewrite
+        with patch.object(self.pipeline, '_create_agent', return_value=normalizer), self.assertRaises(TaskRetryRequired):
+            self.pipeline._ensure_execution_plan()
+        self.assertEqual(self.pipeline.execution_plan.get_stage_attempt('normalize'), 1)
+        self.assertEqual(self.pipeline.execution_plan.read()['demand']['source'], '登录需求')
+        restarted = BreakPipeline(self.temp_dir.name)
+        normalizer.send_message.side_effect = lambda _task: self._write_plan(self._plan())
+        with patch.object(restarted, '_create_agent', return_value=normalizer):
+            restarted._ensure_execution_plan()
+        self.assertEqual(restarted.execution_plan.get_stage_attempt('normalize'), 2)
+        demand = restarted.execution_plan.read()['demand']
+        self.assertEqual([entry['kind'] for entry in demand['attempt_history']['normalize']], ['network_error', 'success'])
+        self.assertIsNone(restarted._pending_receipt('normalize', None))
+        self.assertEqual(demand['source'], '登录需求')
 
     def test_stale_plan_is_replaced_by_normalizer_agent(self):
         stale_plan = self._plan()

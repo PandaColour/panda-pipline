@@ -1266,10 +1266,14 @@ class BreakPipelineTests(unittest.TestCase):
             reviewer = MagicMock()
             reviewer.send_message.return_value = ""
 
-            with patch.object(pipeline, "_create_agent", side_effect=[breaker, reviewer]), \
+            with patch.object(pipeline, "_create_agent", side_effect=[breaker, reviewer] * 11), \
                     patch("builtins.input", return_value="大需求"), \
                     patch("break_pipeline.human_gate", return_value=None) as gate:
-                pipeline._run_breakdown()
+                from task_protocol import TaskRetryRequired
+                for _ in range(10):
+                    with self.assertRaises(TaskRetryRequired):
+                        pipeline._run_breakdown()
+                self.assertFalse(pipeline._run_breakdown())
 
         gate.assert_not_called()
         self.assertEqual(reviewer.send_message.call_count, 10)
@@ -1600,9 +1604,12 @@ class BreakPipelineTests(unittest.TestCase):
             reviewer = MagicMock()
             reviewer.send_message.return_value = "需求变更: 模拟器未启动"
 
+            from task_protocol import TaskRetryRequired
             for _ in range(10):
                 item = pipeline._load_items()[0]
-                pipeline._run_item(item, developer, reviewer)
+                with self.assertRaises(TaskRetryRequired):
+                    pipeline._run_item(item, developer, reviewer)
+            pipeline._run_item(pipeline._load_items()[0], developer, reviewer)
 
             self.assertEqual(reviewer.send_message.call_count, 10)
             plan = json.loads(Path(pipeline.execution_plan_file).read_text(encoding="utf-8"))

@@ -219,7 +219,11 @@ class PipelinePathTests(unittest.TestCase):
             target = Pipeline(work_dir)
             analyst, reviewer = MagicMock(), MagicMock()
             reviewer.send_message.return_value = 'not a receipt'
-            with patch.object(target, '_create_agent', side_effect=[analyst, reviewer]), patch('pipeline.human_gate') as gate:
+            with patch.object(target, '_create_agent', side_effect=[analyst, reviewer] * 11), patch('pipeline.human_gate') as gate:
+                from task_protocol import TaskRetryRequired
+                for _ in range(10):
+                    with self.assertRaises(TaskRetryRequired):
+                        target._run_stage_1_requirements('new project')
                 self.assertFalse(target._run_stage_1_requirements('new project'))
             self.assertEqual(reviewer.send_message.call_count, 10)
             self.assertEqual(analyst.send_message.call_count, 1)

@@ -6,7 +6,7 @@ import sys
 
 from break_pipeline import BreakPipeline
 from environment import setup_environment
-from task_protocol import ReceiptPending
+from task_protocol import TaskRetryRequired
 
 EXIT_COMMANDS = {"q", "quit", "exit"}
 
@@ -34,8 +34,9 @@ def _read_user_requirement(first_round):
 def main(argv=None):
     try:
         return _main(argv)
-    except ReceiptPending as error:
-        print(f'⚠️ {error}\n已保留当前阶段并正常停止；再次启动将只补正该任务回执。')
+    except TaskRetryRequired as error:
+        print(f'⚠️ {error}\n已记录调用次数并保留当前阶段；退出交由启动脚本重新拉起。')
+        raise SystemExit(1) from None
 
 
 def _main(argv=None):

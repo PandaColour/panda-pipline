@@ -23,7 +23,11 @@ class ReceiptError(RuntimeError):
     kind = 'receipt_format_error'
 
 
-class ReceiptPending(Exception):
+class TaskRetryRequired(Exception):
+    """Task state is saved; exit so the wrapper can restart the pipeline."""
+
+
+class ReceiptPending(TaskRetryRequired):
     """A producer needs receipt-only recovery, not another execution."""
 
 

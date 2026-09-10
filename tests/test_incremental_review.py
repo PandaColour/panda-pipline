@@ -81,7 +81,8 @@ class IncrementalReviewTests(unittest.TestCase):
     def interrupt_after_review(self):
         self.reviewer.send_message.side_effect = self.reject
         self.dev.send_message.side_effect = ['实现完成', RuntimeError('interrupted')]
-        with self.assertRaisesRegex(RuntimeError, 'interrupted'):
+        from task_protocol import TaskRetryRequired
+        with self.assertRaises(TaskRetryRequired):
             self.pipeline._run_item(self.item(), self.dev, self.reviewer)
 
     def test_restart_keeps_review_snapshot_even_if_reports_are_overwritten(self):
