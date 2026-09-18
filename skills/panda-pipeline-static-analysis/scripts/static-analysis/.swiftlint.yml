@@ -1,0 +1,18 @@
+only_rules:
+  - no_magic_numbers
+  - function_body_length
+  - type_body_length
+  - file_length
+  - cyclomatic_complexity
+  - large_tuple
+
+function_body_length:
+  warning: 60
+type_body_length:
+  warning: 400
+file_length:
+  warning: 600
+cyclomatic_complexity:
+  warning: 15
+large_tuple:
+  warning: 3

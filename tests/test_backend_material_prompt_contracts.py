@@ -1,6 +1,8 @@
 import unittest
 from pathlib import Path
 
+from tests.test_figma_asset_prompts import prompt_contract
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -365,7 +367,7 @@ class BackendMaterialPromptContractTests(unittest.TestCase):
             ROOT / "break-system-prompt" / "item_requirements_analyst.md",
         ]
         for prompt_file in prompt_files:
-            content = prompt_file.read_text(encoding="utf-8")
+            content = prompt_contract(prompt_file)
             self.assertIn("reference_screens", content, prompt_file.name)
             self.assertIn("视觉基准", content, prompt_file.name)
             self.assertIn("图标尺寸", content, prompt_file.name)
@@ -380,7 +382,7 @@ class BackendMaterialPromptContractTests(unittest.TestCase):
             ROOT / "system-prompt" / "requirements_reviewer.md",
         ]
         for prompt_file in prompt_files:
-            content = prompt_file.read_text(encoding="utf-8")
+            content = prompt_contract(prompt_file)
             reference_screen_lines = [
                 line
                 for line in content.splitlines()
@@ -399,12 +401,16 @@ class BackendMaterialPromptContractTests(unittest.TestCase):
                 self.assertNotIn("关键页面 × 关键状态", line, prompt_file.name)
                 self.assertNotIn("页面 × 状态", line, prompt_file.name)
 
-    def test_developer_prompts_require_backend_mock_disclosure_and_human_todo(self):
+    def test_developer_prompts_require_mock_evidence_without_boilerplate_todo(self):
         for prompt_file in DEVELOPER_PROMPTS:
             content = prompt_file.read_text(encoding="utf-8")
             self.assertIn("后端不可用原因", content, prompt_file.name)
             self.assertIn("mock 方法/位置/范围", content, prompt_file.name)
-            self.assertIn("TODO：请人类使用者尽快补充后端接口信息并完善代码", content, prompt_file.name)
+            self.assertIn("真实未验证范围及补验条件", content, prompt_file.name)
+            self.assertIn("不要求固定 TODO 文案", content, prompt_file.name)
+            self.assertIn("已有说明由开发补齐实现与注释", content, prompt_file.name)
+            self.assertNotIn("TODO：请人类使用者尽快补充后端接口信息并完善代码", content, prompt_file.name)
+            self.assertNotIn("TODO：请人类使用者尽快补充 Swagger/接口语义注释并完善代码", content, prompt_file.name)
 
     def test_developer_prompts_treat_missing_requirement_interface_info_as_existing_code_signal(self):
         for prompt_file in DEVELOPER_PROMPTS:
@@ -470,11 +476,13 @@ class BackendMaterialPromptContractTests(unittest.TestCase):
     def test_android_smoke_prompts_require_adb_hard_timeout(self):
         developer = (ROOT / "break-system-prompt" / "item_developer.md").read_text(encoding="utf-8")
         reviewer = (ROOT / "break-system-prompt" / "item_code_reviewer.md").read_text(encoding="utf-8")
-        self.assertIn("开发 Agent 负责启停", developer)
+        self.assertIn("统一脚本", developer)
         self.assertIn("subprocess.run", developer)
         self.assertIn("timeout=30", developer)
         self.assertIn("waiting for device", developer)
-        self.assertIn("接手启停设备", reviewer)
+        self.assertIn("Code Review", reviewer)
+        self.assertIn("统一脚本", reviewer)
+        self.assertNotIn("不得接手启停设备", reviewer)
         self.assertNotIn("adb_safe.py", developer)
         self.assertNotIn("adb_safe.py", reviewer)
 
@@ -482,19 +490,23 @@ class BackendMaterialPromptContractTests(unittest.TestCase):
         developer = (ROOT / "break-system-prompt" / "item_developer.md").read_text(encoding="utf-8")
         reviewer = (ROOT / "break-system-prompt" / "item_code_reviewer.md").read_text(encoding="utf-8")
         for content in (developer, reviewer):
-            self.assertIn("emulator -list-avds", content)
-            self.assertIn("emulator -avd", content)
+            self.assertIn("panda-pipeline-android-device-validation", content)
+            device_rules = (ROOT / "skills/panda-pipeline-android-device-validation/references/device.md").read_text()
+            self.assertIn("__ANDROID_EMULATOR_COMMAND__", device_rules)
+            self.assertIn("--avd", device_rules)
             self.assertIn("未尝试启动", content)
         self.assertIn("changes_requested", reviewer)
-        self.assertIn("实际执行启动命令后仍失败", reviewer)
+        self.assertIn("脚本实际失败", reviewer)
 
-    def test_review_prompts_allow_disclosed_mocks_but_require_backend_todo(self):
+    def test_review_prompts_require_mock_evidence_not_fixed_todo_wording(self):
         for prompt_file in REVIEW_PROMPTS:
             content = prompt_file.read_text(encoding="utf-8")
             self.assertIn("真实后端接口", content, prompt_file.name)
             self.assertIn("不得仅因 mock 存在不通过", content, prompt_file.name)
-            self.assertIn("缺少后端不可用原因、mock 方法/位置/范围或 TODO", content, prompt_file.name)
-            self.assertIn("TODO：请人类使用者尽快补充后端接口信息并完善代码", content, prompt_file.name)
+            self.assertIn("后端不可用原因、mock 方法/位置/范围", content, prompt_file.name)
+            self.assertIn("真实未验证范围及补验条件", content, prompt_file.name)
+            self.assertIn("不得因缺少固定 TODO 文案而拒绝通过", content, prompt_file.name)
+            self.assertNotIn("TODO：请人类使用者尽快补充后端接口信息并完善代码", content, prompt_file.name)
 
     def test_generic_code_review_requires_mock_network_tests_for_external_blockers(self):
         content = (ROOT / "system-prompt" / "code_reviewer.md").read_text(encoding="utf-8")
@@ -618,8 +630,8 @@ class BackendMaterialPromptContractTests(unittest.TestCase):
             self.assertIn("执行必要测试", content, prompt_file.name)
 
     def test_ui_code_review_prompts_require_relevant_implementation_screenshot_comparison(self):
-        generic = (ROOT / "system-prompt" / "code_reviewer.md").read_text(encoding="utf-8")
-        item = ITEM_CODE_REVIEWER_PROMPT.read_text(encoding="utf-8")
+        generic = prompt_contract(ROOT / "system-prompt" / "code_reviewer.md")
+        item = prompt_contract(ITEM_CODE_REVIEWER_PROMPT)
         for content in (generic, item):
             self.assertIn("actual_screens", content)
             self.assertIn("视觉对比表", content)

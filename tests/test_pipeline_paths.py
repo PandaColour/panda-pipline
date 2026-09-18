@@ -7,12 +7,21 @@ from unittest.mock import MagicMock, patch
 
 import pipeline
 import config
-import static_scan
-from config import SYSTEM_PROMPT_DIR
-from pipeline import Pipeline
+from tests.skill_scripts import static_scan
+from pipeline import Pipeline, SYSTEM_COMMAND_DIR
+from task_protocol import FINAL_INSTRUCTION, TaskMessage
 
 
 class PipelinePathTests(unittest.TestCase):
+
+    def test_normal_flow_forwards_same_material_entry_as_split_flow(self):
+        with tempfile.TemporaryDirectory() as root:
+            instance = Pipeline(root)
+            for stage in ('analysis', 'requirements_review', 'development', 'code_review'):
+                inputs, outputs, _ = instance._task_paths(stage, None)
+                manifest = str(Path(instance.requirement_dir) / 'figma_assets/asset_manifest.json')
+                self.assertIn(manifest, inputs)
+                self.assertNotIn(manifest, outputs)
 
     def test_skip_human_is_forwarded_to_every_human_gate(self):
         pipeline = Pipeline("/tmp/target", skip_human=True)
@@ -102,8 +111,8 @@ class PipelinePathTests(unittest.TestCase):
         self.assertEqual(call.kwargs["status_provider"](), "开发中")
         agent_status.assert_called_once_with()
 
-    def test_memory_curation_template_lives_in_system_prompt(self):
-        template = Path(SYSTEM_PROMPT_DIR) / "memory_curation.md"
+    def test_memory_curation_template_lives_in_system_command(self):
+        template = Path(SYSTEM_COMMAND_DIR) / "memory_curation.md"
 
         self.assertTrue(template.is_file())
         content = template.read_text(encoding="utf-8")
@@ -121,14 +130,17 @@ class PipelinePathTests(unittest.TestCase):
         self.assertIn("当前源码", content)
         self.assertIn("长期 memory 不得写入 R-xxx", content)
 
-    def test_requirement_summary_prompt_requires_auditable_full_log_summary(self):
-        template = Path(__file__).resolve().parents[1] / "break-system-prompt" / "requirement_summary.md"
+    def test_requirement_summary_covers_all_items_with_targeted_log_reads(self):
+        template = Path(__file__).resolve().parents[1] / "break-command" / "requirement_summary.md"
 
         self.assertTrue(template.is_file())
         content = template.read_text(encoding="utf-8")
         for expected in (
             "requirements/requirement_summary.md",
-            "整个 `requirements/`",
+            "覆盖 `requirements/` 中每个小需求",
+            "不默认逐文件或全文读取",
+            "按对应引用定点读取",
+            "必要证据仍须核验",
             "实现状态",
             "文档冲突",
             "文档缺失",
@@ -138,11 +150,11 @@ class PipelinePathTests(unittest.TestCase):
         ):
             self.assertIn(expected, content)
 
-    def test_final_reflection_renders_system_prompt_template(self):
+    def test_final_reflection_renders_command_template(self):
         with tempfile.TemporaryDirectory() as work_dir, tempfile.TemporaryDirectory() as prompt_dir:
             template = Path(prompt_dir) / "memory_curation.md"
             template.write_text(
-                "CUSTOM SYSTEM TEMPLATE\n"
+                "CUSTOM COMMAND TEMPLATE\n"
                 "{opening}\n"
                 "{read_instruction}\n"
                 "{curation_scope}\n"
@@ -151,7 +163,7 @@ class PipelinePathTests(unittest.TestCase):
                 encoding="utf-8",
             )
             pipeline = Pipeline(work_dir)
-            pipeline.prompt_dir = prompt_dir
+            pipeline.command_dir = prompt_dir
             analyst = MagicMock()
             developer = MagicMock()
             pipeline.agents = {
@@ -164,9 +176,12 @@ class PipelinePathTests(unittest.TestCase):
             analyst_prompt = analyst.send_message.call_args.args[0]
             developer_prompt = developer.send_message.call_args.args[0]
             for prompt in (analyst_prompt, developer_prompt):
-                self.assertIn("CUSTOM SYSTEM TEMPLATE", prompt)
+                self.assertIn("CUSTOM COMMAND TEMPLATE", prompt)
                 self.assertIn(pipeline.execution_plan_file, prompt)
                 self.assertIn("收到记忆整理指令", prompt)
+                self.assertIsInstance(prompt, TaskMessage)
+                self.assertEqual(prompt.statuses, {'completed'})
+                self.assertEqual(prompt.count(FINAL_INSTRUCTION), 1)
 
     def test_run_passes_user_idea_into_requirements_stage(self):
         pipeline = Pipeline("relative-workspace")

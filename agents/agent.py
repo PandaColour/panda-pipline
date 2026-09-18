@@ -1,13 +1,15 @@
 import os
 
 from config import SYSTEM_PROMPT_DIR
+from task_protocol import TaskMessage, validate_receipt
+from pipeline_skills import role_prompt_path, render_source_prompt, skill_context
 
+from ._prompt_snapshot import FixedSystemPrompt, freeze_system_prompt
 from .claude import ClaudeAgent
 from .codex import CodexAgent
 from .cursor import CursorAgent
 from .dsh import DshAgent
 from .opencode import OpencodeAgent
-from task_protocol import TaskMessage, validate_receipt, save_call_log
 
 
 class Agent:
@@ -67,11 +69,15 @@ class Agent:
     def _load_system_prompt(self, filename):
         filepath = os.path.join(self.prompt_dir, filename)
         try:
-            with open(filepath, "r", encoding="utf-8") as prompt_file:
-                return prompt_file.read()
+            source = role_prompt_path(self.work_dir, filepath)
+            prompt = render_source_prompt(source.read_text(encoding='utf-8'), self.work_dir)
         except FileNotFoundError:
             print(f"⚠️  Warning: system prompt file not found: {filepath}")
             return ""
+        if str(source) != filepath:
+            # Environment preparation already rendered this role at its fixed path.
+            return FixedSystemPrompt(prompt, source)
+        return freeze_system_prompt(prompt, filepath)
 
     @property
     def display_name(self):
@@ -126,16 +132,17 @@ class Agent:
         # consumes its persisted budget, including malformed receipt corrections.
         if isinstance(message, TaskMessage):
             self.agent_impl.max_retries = 0
+        self.last_run_result = None
+        context = skill_context(self.work_dir, self.agent_type) if 'panda-pipeline-' in self.system_prompt else ''
+        outgoing = context + '\n' + str(message) if context else message
         result = self.agent_impl.run(
             work_dir=self.work_dir,
-            message=message,
+            message=outgoing,
             system_prompt=self.system_prompt,
             session_id=self.session_id,
             add_dirs=self.add_dirs,
         )
         self.last_run_result = result
-        if isinstance(message, TaskMessage):
-            self.last_log_path = save_call_log(self.work_dir, self.name, result.error or result.text or '')
         previous_session_id = self.session_id
         if result.session_id:
             self.session_id = result.session_id

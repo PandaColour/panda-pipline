@@ -1,4 +1,4 @@
-"""多语言静态扫描：供 pipeline.py 与 break_pipeline.py 共用（两模块彼此独立）。
+"""多语言静态扫描：供普通流水线与 Agent 共用的独立 CLI。
 
 语言与工具：
 - Kotlin → detekt（魔法数/复杂度/内聚耦合）+ PMD CPD（代码重复）
@@ -19,7 +19,10 @@ import shutil
 import subprocess
 import tempfile
 
-from config import DETEKT_CONFIG_PATH, STATIC_ANALYSIS_DIR
+from pathlib import Path
+
+STATIC_ANALYSIS_DIR = str(Path(__file__).resolve().parent / "static-analysis")
+DETEKT_CONFIG_PATH = os.path.join(STATIC_ANALYSIS_DIR, "detekt.yml")
 
 SCAN_CONFIG_PATH = os.path.join(STATIC_ANALYSIS_DIR, "scan_config.json")
 CHECKSTYLE_CONFIG_PATH = os.path.join(STATIC_ANALYSIS_DIR, "checkstyle-config.xml")

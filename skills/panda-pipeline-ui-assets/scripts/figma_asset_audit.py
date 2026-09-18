@@ -1,6 +1,7 @@
 """Read-only completeness audit for Agent-prepared Figma material packages."""
 
 import argparse
+import hashlib
 import json
 import re
 import struct
@@ -131,9 +132,11 @@ def _valid_svg(path):
     return root.tag.rsplit("}", 1)[-1].lower() == "svg"
 
 
-def _validate_file(requirement_id, frame_id, asset_id, relative_path, format_name, record, requirement_dir):
+def _validate_file(requirement_id, frame_id, asset_id, relative_path, format_name, record, requirement_dir, *, relative_only=False):
     issues = []
     try:
+        if relative_only and Path(relative_path).is_absolute():
+            raise AuditInputError('asset path must be relative to the requirement directory')
         path = _safe_local_path(requirement_dir, relative_path)
     except AuditInputError as error:
         return [_issue("asset_path_invalid", requirement_id, str(error), frame_id, asset_id, relative_path)]
@@ -157,19 +160,49 @@ def _validate_file(requirement_id, frame_id, asset_id, relative_path, format_nam
     return issues
 
 
+def _validate_design_source(requirement_dir, requirement_id, frame_id, record):
+    if not isinstance(record, dict) or not record.get('path'):
+        return None, [_issue('design_source_missing', requirement_id,
+                             'FRAME lacks a local design_source record', frame_id)]
+    relative_path = record['path']
+    try:
+        if not isinstance(relative_path, str) or Path(relative_path).is_absolute():
+            raise ValueError('design source path must be relative to the requirement directory')
+        if normalize_node_id(record.get('node_id', '')) != frame_id:
+            raise ValueError('design source node_id does not match FRAME')
+        if not isinstance(record.get('revision'), str) or not record['revision'].strip():
+            raise ValueError('design source revision is missing')
+        path = _safe_local_path(requirement_dir, relative_path)
+        content = path.read_bytes()
+        if hashlib.sha256(content).hexdigest() != record.get('sha256'):
+            raise ValueError('design source sha256 does not match local file')
+        data = json.loads(content)
+        if not isinstance(data, (dict, list)) or not data:
+            raise ValueError('design source must contain a nonempty original JSON response')
+    except (AuditInputError, OSError, ValueError, TypeError) as error:
+        return relative_path if isinstance(relative_path, str) else None, [
+            _issue('design_source_invalid', requirement_id, str(error), frame_id,
+                   path=str(relative_path))]
+    return relative_path, []
+
+
 def _audit_requirement(requirements_dir, requirement_id, inventory_frames):
     requirement_dir = _find_requirement_dir(requirements_dir, requirement_id)
     manifest_path = requirement_dir / "figma_assets" / "asset_manifest.json"
     manifest = _load_json(manifest_path)
-    if not isinstance(manifest, dict) or manifest.get("schema_version") not in (1, 2):
+    if not isinstance(manifest, dict) or manifest.get("schema_version") not in (1, 2, 3):
         raise AuditInputError(f"unsupported asset manifest schema: {manifest_path}")
     if manifest.get("requirement_id") != requirement_id or not isinstance(manifest.get("frames"), list):
         raise AuditInputError(f"invalid asset manifest identity or frames: {manifest_path}")
-    mapping = _mapping_entries(requirement_dir)
-    scoped_selection = manifest["schema_version"] == 2
+    indexed = manifest['schema_version'] == 3
+    # In v3, FRAME + reference_screen + assets is the authoritative mapping.
+    # Keep the old document parser only for unmodified legacy packages.
+    mapping = set() if indexed else _mapping_entries(requirement_dir)
+    scoped_selection = manifest["schema_version"] >= 2
     issues = []
     tracked_paths = {"figma_assets/asset_manifest.json"}
-    counts = {"frames": len(inventory_frames), "remote_reads": 0, "discovered_assets": 0, "required_assets": 0, "exported_assets": 0, "reused_assets": 0, "skipped_assets": 0, "missing": 0}
+    counts = {"frames": len(inventory_frames), "remote_reads": 0, "discovered_assets": 0, "required_assets": 0, "exported_assets": 0, "reused_assets": 0, "skipped_assets": 0, "missing": 0,
+              "design_sources": 0, "legacy_manifests": int(not indexed)}
 
     expected = {(frame["name"], frame["node_id"], frame["state"]): frame for frame in inventory_frames}
     actual = {}
@@ -185,19 +218,36 @@ def _audit_requirement(requirements_dir, requirement_id, inventory_frames):
 
     for key, frame in actual.items():
         frame_id = key[1]
+        if indexed:
+            source_path, source_issues = _validate_design_source(
+                requirement_dir, requirement_id, frame_id, frame.get('design_source'))
+            if source_path:
+                tracked_paths.add(source_path)
+            issues.extend(source_issues)
+            if not source_issues:
+                counts['design_sources'] += 1
         remote = frame.get("remote_read")
         if isinstance(remote, dict) and remote.get("status") == "success" and remote.get("tool") == "get_figma_node":
             counts["remote_reads"] += 1
+        elif indexed and isinstance(remote, dict) and (
+            (remote.get('status') == 'failed' and isinstance(remote.get('reason'), str) and remote['reason'].strip())
+            or (remote.get('status') == 'success' and isinstance(remote.get('tool'), str) and remote['tool'].strip())
+        ):
+            # Local material completeness is independent of current MCP access.
+            # REST success is not counted as a get_figma_node success.
+            pass
         else:
-            issues.append(_issue("remote_read_incomplete", requirement_id, "FRAME lacks successful get_figma_node evidence", frame_id))
+            message = ('FRAME lacks an actual tool result or a failure reason' if indexed
+                       else 'FRAME lacks successful get_figma_node evidence')
+            issues.append(_issue("remote_read_incomplete", requirement_id, message, frame_id))
         reference = frame.get("reference_screen")
         if not isinstance(reference, dict) or not reference.get("path"):
             issues.append(_issue("reference_screen_missing", requirement_id, "FRAME lacks a reference screen record", frame_id))
         else:
             ref_path = str(reference["path"])
             tracked_paths.add(ref_path)
-            issues.extend(_validate_file(requirement_id, frame_id, frame_id, ref_path, reference.get("format", ""), reference, requirement_dir))
-            if (frame_id, ref_path) not in mapping:
+            issues.extend(_validate_file(requirement_id, frame_id, frame_id, ref_path, reference.get("format", ""), reference, requirement_dir, relative_only=indexed))
+            if not indexed and (frame_id, ref_path) not in mapping:
                 issues.append(_issue("reference_mapping_missing", requirement_id, "reference screen is absent from material mapping", frame_id, frame_id, ref_path))
 
         assets = frame.get("assets")
@@ -231,7 +281,7 @@ def _audit_requirement(requirements_dir, requirement_id, inventory_frames):
                     issues.append(_issue("forbidden_asset_skip", requirement_id, "independent business asset cannot be skipped", frame_id, asset_id))
                 continue
             if decision not in (("export", "reuse") if scoped_selection else ("export",)):
-                issues.append(_issue("asset_decision_missing", requirement_id, "asset decision must be export, reuse (schema 2), or skip", frame_id, asset_id))
+                issues.append(_issue("asset_decision_missing", requirement_id, "asset decision must be export, reuse (schema 2/3), or skip", frame_id, asset_id))
                 continue
             if scoped_selection and required is not True:
                 issues.append(_issue("unnecessary_asset_export", requirement_id, "only required assets may be exported or reused", frame_id, asset_id))
@@ -245,9 +295,9 @@ def _audit_requirement(requirements_dir, requirement_id, inventory_frames):
                 issues.append(_issue("asset_export_invalid", requirement_id, "exported asset lacks format or local path", frame_id, asset_id, relative_path))
                 continue
             tracked_paths.add(relative_path)
-            file_issues = _validate_file(requirement_id, frame_id, asset_id, relative_path, format_name, asset, requirement_dir)
+            file_issues = _validate_file(requirement_id, frame_id, asset_id, relative_path, format_name, asset, requirement_dir, relative_only=indexed)
             issues.extend(file_issues)
-            mapped = (asset_id, relative_path) in mapping
+            mapped = indexed or (asset_id, relative_path) in mapping
             if not mapped:
                 issues.append(_issue("asset_mapping_missing", requirement_id, "exported asset is absent from material mapping", frame_id, asset_id, relative_path))
             if mapped and not file_issues:
@@ -285,7 +335,8 @@ def audit_requirements(requirements_dir, requirement_id=None):
         raise AuditInputError(f"requirement id not found in inventory: {requirement_id}")
     reports = []
     issues = []
-    totals = {"requirements": 0, "frames": 0, "remote_reads": 0, "discovered_assets": 0, "required_assets": 0, "exported_assets": 0, "reused_assets": 0, "skipped_assets": 0, "missing": 0}
+    totals = {"requirements": 0, "frames": 0, "remote_reads": 0, "discovered_assets": 0, "required_assets": 0, "exported_assets": 0, "reused_assets": 0, "skipped_assets": 0, "missing": 0,
+              "design_sources": 0, "legacy_manifests": 0}
     for current_id in selected_ids:
         counts, current_issues = _audit_requirement(requirements_dir, current_id, inventory[current_id])
         reports.append({"requirement_id": current_id, **counts})
@@ -295,7 +346,10 @@ def audit_requirements(requirements_dir, requirement_id=None):
             totals[key] += counts[key]
     issues.sort(key=lambda item: (item["requirement_id"], item["frame_node_id"], item["asset_node_id"], item["code"], item["path"]))
     totals["missing"] = len(issues)
-    return {"status": "passed" if not issues else "failed", "requirements": reports, "totals": totals, "issues": issues}
+    legacy = [report['requirement_id'] for report in reports if report['legacy_manifests']]
+    return {"status": "passed" if not issues else "failed", "requirements": reports, "totals": totals, "issues": issues,
+            "legacy_requirements": legacy,
+            "limitations": ["Legacy schema 1/2 uses Markdown mappings; local design source integrity was not checked."] if legacy else []}
 
 
 def _write_report(path, report):

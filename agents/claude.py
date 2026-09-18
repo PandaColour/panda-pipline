@@ -3,10 +3,10 @@ import subprocess
 import sys
 import time
 
+from ._cli import executable_name
+from ._prompt_snapshot import check_command_length, prompt_file
 from ._result import AgentRunResult
 from ._retry import run_with_retry
-from ._cli import executable_name
-
 
 CLAUDE_BASE_CMD = [
     executable_name("claude"),
@@ -104,12 +104,13 @@ class ClaudeAgent:
         if session_id:
             cmd.extend(["--resume", session_id])
         if system_prompt:
-            cmd.extend(["--append-system-prompt", system_prompt])
+            cmd.extend(["--append-system-prompt-file", prompt_file(system_prompt)])
         for directory in add_dirs or []:
             cmd.extend(["--add-dir", directory])
         cmd.append("-p")
 
         try:
+            check_command_length(cmd)
             process = subprocess.Popen(
                 cmd, cwd=work_dir, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT, text=True, encoding="utf-8", bufsize=1,

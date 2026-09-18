@@ -5,10 +5,10 @@ import subprocess
 import sys
 import time
 
+from ._cli import executable_name
+from ._prompt_snapshot import check_command_length, freeze_system_prompt
 from ._result import AgentRunResult
 from ._retry import run_with_retry
-from ._cli import executable_name
-
 
 OPENCODE_BASE_CMD = [
     executable_name("opencode"), "run",
@@ -109,15 +109,17 @@ class OpencodeAgent:
                 directories = "\n".join(f"- {directory}" for directory in add_dirs)
                 prompt = f"{prompt}\n\n[ADDITIONAL DIRECTORIES]\n{directories}\n[/ADDITIONAL DIRECTORIES]"
             if system_prompt:
-                prompt = f"[SYSTEM PROMPT]\n{system_prompt}\n[/SYSTEM PROMPT]\n\n[USER PROMPT]\n{prompt}"
-        cmd.append(prompt)
+                prompt = f"[SYSTEM PROMPT]\n{freeze_system_prompt(system_prompt)}\n[/SYSTEM PROMPT]\n\n[USER PROMPT]\n{prompt}"
 
         try:
+            check_command_length(cmd)
             process = subprocess.Popen(
-                cmd, cwd=work_dir, stdin=subprocess.DEVNULL,
+                cmd, cwd=work_dir, stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                 encoding="utf-8", bufsize=1,
             )
+            process.stdin.write(prompt)
+            process.stdin.close()
             text_parts = []
             raw_output_parts = []
             stream_state = {

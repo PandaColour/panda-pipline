@@ -9,11 +9,13 @@ from unittest.mock import MagicMock, patch
 from agents import Agent
 from agents._result import AgentRunResult
 import break_pipeline
+from break_pipeline import BREAK_COMMAND_DIR
+from task_protocol import FINAL_INSTRUCTION, TaskMessage
 from break_pipeline import BREAK_SYSTEM_PROMPT_DIR
 from break_pipeline import BreakPipeline
 from break_pipeline import RequirementItem
 import config
-import static_scan
+from tests.skill_scripts import static_scan
 
 
 class SessionReturningAgent:
@@ -587,8 +589,8 @@ class BreakPipelineTests(unittest.TestCase):
         self.assertNotIn("R-001", pipeline._active_item_agents)
         self.assertNotIn(agent.name, pipeline.agents)
 
-    def test_memory_curation_template_lives_in_break_system_prompt(self):
-        template = Path(BREAK_SYSTEM_PROMPT_DIR) / "memory_curation.md"
+    def test_memory_curation_template_lives_in_break_command(self):
+        template = Path(BREAK_COMMAND_DIR) / "memory_curation.md"
 
         self.assertTrue(template.is_file())
         content = template.read_text(encoding="utf-8")
@@ -604,7 +606,7 @@ class BreakPipelineTests(unittest.TestCase):
         self.assertIn("为后续类似项目从0到1提供指导", content)
         self.assertIn("为后续需求提供代码索引", content)
 
-    def test_item_memory_prompt_renders_break_system_prompt_template(self):
+    def test_item_memory_renders_command_template(self):
         with tempfile.TemporaryDirectory() as work_dir, tempfile.TemporaryDirectory() as prompt_dir:
             template = Path(prompt_dir) / "memory_curation.md"
             template.write_text(
@@ -617,7 +619,7 @@ class BreakPipelineTests(unittest.TestCase):
                 encoding="utf-8",
             )
             pipeline = BreakPipeline(work_dir)
-            pipeline.prompt_dir = prompt_dir
+            pipeline.command_dir = prompt_dir
             self._write_requirement_files(work_dir, "R-001")
             self._write_index(work_dir, [(1, "R-001", "记忆整理中", "无", "001-first.md")])
             item = RequirementItem(
@@ -638,6 +640,9 @@ class BreakPipelineTests(unittest.TestCase):
                 self.assertIn("CUSTOM TEMPLATE", prompt)
                 self.assertIn(pipeline.execution_plan_file, prompt)
                 self.assertIn("调用消息指定的小需求已通过人工审核", prompt)
+                self.assertIsInstance(prompt, TaskMessage)
+                self.assertEqual(prompt.statuses, {'completed'})
+                self.assertEqual(prompt.count(FINAL_INSTRUCTION), 1)
 
     def test_execution_persists_lifecycle_times_and_logs_boundaries(self):
         with tempfile.TemporaryDirectory() as work_dir:
@@ -817,6 +822,10 @@ class BreakPipelineTests(unittest.TestCase):
             self.assertIn("Agent 自主决策", prompt)
             self.assertNotIn("只进行拆分层面的最终记忆整理", prompt)
             self.assertNotIn("memory_report.md", prompt)
+            self.assertIsInstance(prompt, TaskMessage)
+            self.assertEqual(prompt.statuses, {'completed'})
+            self.assertEqual(prompt.count(FINAL_INSTRUCTION), 1)
+            self.assertNotIn('## FINAL_ANSWER', prompt)
 
     def test_requirement_summary_validation_requires_all_indexed_items_and_sections(self):
         with tempfile.TemporaryDirectory() as work_dir:
@@ -1700,7 +1709,7 @@ class BreakPipelineTests(unittest.TestCase):
         reviewer = Path(BREAK_SYSTEM_PROMPT_DIR, "requirement_break_reviewer.md").read_text(encoding="utf-8")
         self.assertIn("静态扫描小需求", breaker)
         self.assertIn("需求类型: 静态扫描", breaker)
-        self.assertIn("python3 static_scan.py", breaker)
+        self.assertIn("__PANDA_STATIC_SCAN_COMMAND__", breaker)
         self.assertIn("最后一项", breaker)
         self.assertIn("静态扫描小需求门禁", reviewer)
         self.assertIn("需求类型: 静态扫描", reviewer)
@@ -1709,9 +1718,9 @@ class BreakPipelineTests(unittest.TestCase):
         developer = Path(BREAK_SYSTEM_PROMPT_DIR, "item_developer.md").read_text(encoding="utf-8")
         code_reviewer = Path(BREAK_SYSTEM_PROMPT_DIR, "item_code_reviewer.md").read_text(encoding="utf-8")
         self.assertIn("需求类型: 静态扫描", developer)
-        self.assertIn("python3 static_scan.py --work-dir", developer)
+        self.assertIn("__PANDA_STATIC_SCAN_COMMAND__ --work-dir", developer)
         self.assertIn("把静态扫描当作本项交付步骤", developer)
-        self.assertIn("仅当 `user_requirements.md` 标明 `需求类型: 静态扫描`", code_reviewer)
+        self.assertIn("仅当分析报告承接的需求类型明确为 `需求类型: 静态扫描`", code_reviewer)
         self.assertIn("普通功能小需求跳过本条", code_reviewer)
 
 

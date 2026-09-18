@@ -34,6 +34,9 @@ class EnvironmentModuleTests(unittest.TestCase):
                     patch.object(environment, "REPOS", [{"url": repo_url, "branch": "main"}]), \
                     patch.object(environment, "DEFAULT_MEMORY_SOURCE_DIR", source_dir), \
                     patch.object(environment, "_install_static_analysis_tools"), \
+                    patch.object(environment, "_prepare_external_dependencies"), \
+                    patch.object(environment, "prepare_pipeline_skills"), \
+                    patch.object(environment, "_prepare_figma_mcp"), \
                     patch.object(environment, "_prepare_codegraph") as prepare_codegraph, \
                     patch.object(environment, "_clone_or_pull", side_effect=clone_or_pull):
                 work_dir = environment.setup_environment()
@@ -58,12 +61,18 @@ class EnvironmentModuleTests(unittest.TestCase):
             with patch.object(environment, "PROJECT_ROOT", project_root), \
                     patch.object(environment, "REPOS", [{"url": repo_url, "branch": "main"}]), \
                     patch.object(environment, "_install_static_analysis_tools"), \
+                    patch.object(environment, "_prepare_external_dependencies") as prepare_external, \
+                    patch.object(environment, "prepare_pipeline_skills") as prepare_skills, \
+                    patch.object(environment, "_prepare_figma_mcp") as prepare_mcp, \
                     patch.object(environment, "_clone_or_pull"), \
                     patch.object(environment, "_prepare_codegraph") as prepare_codegraph, \
                     patch.object(environment, "_ensure_default_memory"):
                 work_dir = environment.setup_environment()
 
             self.assertEqual(work_dir, target_path)
+            prepare_external.assert_called_once_with(target_path)
+            prepare_skills.assert_called_once_with(target_path)
+            prepare_mcp.assert_called_once_with(target_path)
             prepare_codegraph.assert_called_once_with(target_path)
 
     def test_default_memory_is_not_overwritten_when_present(self):

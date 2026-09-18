@@ -1,11 +1,15 @@
 import json
+import hashlib
 import struct
 import tempfile
 import unittest
 import zlib
 from pathlib import Path
 
-from figma_asset_audit import audit_requirements, main
+from tests.skill_scripts import figma_asset_audit
+
+audit_requirements = figma_asset_audit.audit_requirements
+main = figma_asset_audit.main
 
 
 class FigmaAssetAuditTests(unittest.TestCase):
@@ -94,6 +98,112 @@ class FigmaAssetAuditTests(unittest.TestCase):
     def _save_and_audit(self, directory, manifest):
         (directory / "figma_assets/asset_manifest.json").write_text(json.dumps(manifest))
         return audit_requirements(self.requirements_dir)
+
+    def _indexed_fixture(self):
+        directory, manifest = self._selected_fixture()
+        manifest['schema_version'] = 3
+        source = directory / 'figma_assets/design_sources/loading.json'
+        source.parent.mkdir(exist_ok=True)
+        source.write_text(json.dumps({'id': '143:4432', 'name': 'Loading', 'children': []}))
+        manifest['frames'][0]['design_source'] = {
+            'path': 'figma_assets/design_sources/loading.json',
+            'sha256': hashlib.sha256(source.read_bytes()).hexdigest(),
+            'node_id': '143:4432', 'revision': 'version-1',
+        }
+        return directory, manifest
+
+    def test_index_survives_document_simplification_and_new_analyst_assets(self):
+        directory, manifest = self._indexed_fixture()
+        original = directory / 'user_requirements.md'
+        original.write_text('# Requirement\nSee figma_assets/asset_manifest.json\n')
+        (directory / 'requirements_analysis.md').write_text('## UI\nSee figma_assets/asset_manifest.json\n')
+        extra = directory / 'figma_assets/icons/close.svg'
+        extra.write_text('<svg xmlns="http://www.w3.org/2000/svg"/>')
+        manifest['frames'][0]['assets'].append(dict(
+            manifest['frames'][0]['assets'][0], node_id='143:9000',
+            local_path='figma_assets/icons/close.svg', usage='close button',
+            selection_evidence='AC-02 close button'))
+        report = self._save_and_audit(directory, manifest)
+        self.assertEqual('passed', report['status'])
+        self.assertEqual(2, report['totals']['exported_assets'])
+        self.assertEqual(original.read_text(), '# Requirement\nSee figma_assets/asset_manifest.json\n')
+
+    def test_index_does_not_need_markdown_mapping_document(self):
+        directory, manifest = self._indexed_fixture()
+        (directory / 'user_requirements.md').unlink()
+        self.assertEqual('passed', self._save_and_audit(directory, manifest)['status'])
+
+    def test_index_requires_design_source_for_each_frame(self):
+        directory, manifest = self._indexed_fixture()
+        del manifest['frames'][0]['design_source']
+        self.assertIn('design_source_missing', self._codes(self._save_and_audit(directory, manifest)))
+
+    def test_index_rejects_missing_corrupt_or_changed_source(self):
+        for kind in ('missing', 'corrupt', 'changed', 'empty'):
+            with self.subTest(kind=kind):
+                directory, manifest = self._indexed_fixture()
+                record = manifest['frames'][0]['design_source']
+                source = directory / record['path']
+                if kind == 'missing':
+                    source.unlink()
+                else:
+                    source.write_text({'corrupt': '{', 'changed': '{"id":"143:4432","name":"changed"}', 'empty': '{}'}[kind])
+                    if kind != 'changed':
+                        record['sha256'] = hashlib.sha256(source.read_bytes()).hexdigest()
+                report = self._save_and_audit(directory, manifest)
+                self.assertIn('design_source_invalid', self._codes(report))
+
+    def test_index_rejects_source_path_escape_and_wrong_identity(self):
+        for field, value in [('path', '../outside.json'), ('node_id', '143:9999'), ('revision', '')]:
+            with self.subTest(field=field):
+                directory, manifest = self._indexed_fixture()
+                manifest['frames'][0]['design_source'][field] = value
+                self.assertIn('design_source_invalid', self._codes(self._save_and_audit(directory, manifest)))
+
+    def test_local_source_survives_current_mcp_failure_without_faking_remote_success(self):
+        directory, manifest = self._indexed_fixture()
+        manifest['frames'][0]['remote_read'] = {'status': 'failed', 'tool': 'get_figma_node', 'reason': '429'}
+        report = self._save_and_audit(directory, manifest)
+        self.assertEqual('passed', report['status'])
+        self.assertEqual(0, report['totals']['remote_reads'])
+        manifest['frames'][0]['remote_read'].pop('reason')
+        self.assertIn('remote_read_incomplete', self._codes(self._save_and_audit(directory, manifest)))
+
+    def test_index_still_rejects_missing_and_untracked_business_assets(self):
+        directory, manifest = self._indexed_fixture()
+        (directory / manifest['frames'][0]['assets'][0]['local_path']).unlink()
+        (directory / 'figma_assets/icons/unknown.svg').write_text('<svg/>')
+        codes = self._codes(self._save_and_audit(directory, manifest))
+        self.assertIn('asset_file_missing', codes)
+        self.assertIn('untracked_asset_file', codes)
+
+    def test_index_rejects_absolute_material_paths_even_inside_requirement(self):
+        directory, manifest = self._indexed_fixture()
+        for record, key in [(manifest['frames'][0]['reference_screen'], 'path'),
+                            (manifest['frames'][0]['assets'][0], 'local_path')]:
+            record[key] = str(directory / record[key])
+        report = self._save_and_audit(directory, manifest)
+        self.assertEqual(2, sum(i['code'] == 'asset_path_invalid' for i in report['issues']))
+
+    def test_rest_source_is_not_counted_as_successful_mcp_read(self):
+        directory, manifest = self._indexed_fixture()
+        manifest['frames'][0]['remote_read'] = {'status': 'success', 'tool': 'REST'}
+        report = self._save_and_audit(directory, manifest)
+        self.assertEqual('passed', report['status'])
+        self.assertEqual(0, report['totals']['remote_reads'])
+
+    def test_index_relative_paths_survive_requirements_archive(self):
+        directory, manifest = self._indexed_fixture()
+        self._save_and_audit(directory, manifest)
+        archive = self.root / 'requirements-archive'
+        self.requirements_dir.rename(archive)
+        self.assertEqual('passed', audit_requirements(archive)['status'])
+
+    def test_legacy_audit_explicitly_discloses_unchecked_design_sources(self):
+        self._fixture()
+        report = audit_requirements(self.requirements_dir)
+        self.assertEqual('passed', report['status'])
+        self.assertEqual(['R-003'], report['legacy_requirements'])
 
     def test_unused_image_candidate_does_not_require_download(self):
         directory, manifest = self._selected_fixture()

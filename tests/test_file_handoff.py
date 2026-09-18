@@ -10,6 +10,313 @@ from break_pipeline import BreakPipeline
 
 
 class FileHandoffTests(unittest.TestCase):
+    def test_zero_exit_receipt_is_corrected_locally_once_across_stages(self):
+        from agents import Agent
+        from agents._result import AgentRunResult
+        from task_protocol import TaskRetryRequired
+        from unittest.mock import patch
+        for stage in ('analysis', 'development', 'memory_analysis', 'memory_development',
+                      'breakdown', 'summary', 'normalize', 'requirements_review',
+                      'code_review', 'breakdown_review'):
+            for correction_ok in (True, False):
+                with self.subTest(stage=stage, correction_ok=correction_ok), tempfile.TemporaryDirectory() as root:
+                    pipeline = self.pipeline_fixture(root)
+                    item = None if stage in {'breakdown', 'summary', 'normalize', 'breakdown_review'} else pipeline._load_items()[0]
+                    rid = item.requirement_id if item else None
+                    reviewing = stage in {'requirements_review', 'code_review', 'breakdown_review'}
+                    if reviewing:
+                        pipeline.execution_plan.increment_stage_attempt(stage, rid)
+                    _, outputs, _ = pipeline._task_paths(stage, item)
+                    for output in outputs:
+                        if stage != 'normalize':
+                            Path(output).write_text('existing evidence')
+                    with patch.object(Agent, '_load_system_prompt', return_value=''):
+                        agent = Agent('test', 'unused.md', root, agent_type='cursor')
+                    valid = 'FINAL_ANSWER ' + json.dumps(dict(
+                        status='approved' if reviewing else 'completed', summary='verified',
+                        outputs={str(i): path for i, path in enumerate(outputs)}))
+                    agent.agent_impl = MagicMock()
+                    agent.agent_impl.run.side_effect = [
+                        AgentRunResult('报告已写入', 'same-session', 0),
+                        AgentRunResult(valid if correction_ok else '', 'same-session', 0)]
+                    if correction_ok:
+                        self.assertIn('verified', pipeline._send_task(agent, 'business task', stage, item))
+                        self.assertIsNone(pipeline._pending_receipt(stage, rid))
+                    else:
+                        with self.assertRaises(TaskRetryRequired):
+                            pipeline._send_task(agent, 'business task', stage, item)
+                        self.assertEqual(pipeline._pending_receipt(stage, rid)['mode'], 'receipt')
+                    self.assertEqual(agent.agent_impl.run.call_count, 2)
+                    self.assertEqual(pipeline.execution_plan.get_stage_attempt(stage, rid), 2)
+                    second = agent.agent_impl.run.call_args.kwargs
+                    self.assertEqual(second['session_id'], 'same-session')
+                    self.assertIn('回执补正', second['message'])
+                    self.assertIn('不得重新执行开发、测试或审核', second['message'])
+                    self.assertIn('缺少 FINAL_ANSWER', second['message'])
+                    state = pipeline.execution_plan._agent_session_target(pipeline.execution_plan.read(), rid)
+                    self.assertEqual(state['attempt_history'][stage][0]['exit_code'], 0)
+                    self.assertEqual(state['attempt_history'][stage][-1]['attempt'],
+                                     2 if reviewing or not correction_ok else 1)
+
+    def test_review_local_correction_respects_last_available_attempt(self):
+        from agents._result import AgentRunResult
+        from task_protocol import ReceiptError, TaskRetryRequired
+        with tempfile.TemporaryDirectory() as root:
+            pipeline = self.pipeline_fixture(root, 9)
+            reviewer = MagicMock()
+            reviewer.last_run_result = AgentRunResult('', None, 0)
+            reviewer.send_message.side_effect = ReceiptError('缺少 FINAL_ANSWER')
+            with self.assertRaises(TaskRetryRequired):
+                pipeline._run_item(pipeline._load_items()[0], MagicMock(), reviewer)
+            self.assertEqual(reviewer.send_message.call_count, 1)
+            self.assertEqual(pipeline.execution_plan.get_stage_attempt('code_review', 'R-001'), 10)
+
+    def test_corrected_rejection_at_limit_does_not_start_development(self):
+        from agents._result import AgentRunResult
+        with tempfile.TemporaryDirectory() as root:
+            pipeline = self.pipeline_fixture(root, 8)
+            developer, reviewer = MagicMock(), MagicMock()
+            reviewer.last_run_result = AgentRunResult('', None, 0)
+            reviewer.send_message.side_effect = [
+                'broken', 'FINAL_ANSWER {"status":"changes_requested","summary":"CR-001 remains"}']
+            pipeline._run_item(pipeline._load_items()[0], developer, reviewer)
+            developer.send_message.assert_not_called()
+            self.assertEqual(reviewer.send_message.call_count, 2)
+            self.assertEqual(pipeline.execution_plan.get_stage_attempt('code_review', 'R-001'), 10)
+            self.assertEqual(pipeline.execution_plan.read()['items'][0]['status'], '未通过，跳过执行')
+
+    def test_normalizer_correction_preserves_written_plan_and_failure_accounting(self):
+        from agents import Agent
+        from agents._result import AgentRunResult
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as root:
+            pipeline = self.pipeline_fixture(root)
+            with patch.object(Agent, '_load_system_prompt', return_value=''):
+                agent = Agent('test', 'unused.md', root, agent_type='cursor')
+            def run(**kwargs):
+                plan = pipeline.execution_plan.read()
+                if '回执补正' not in kwargs['message']:
+                    plan['items'][0]['name'] = 'new normalized requirement'
+                    plan['demand'].pop('stage_attempts', None)
+                    pipeline.execution_plan.write(plan)
+                    return AgentRunResult('', None, 0)
+                self.assertEqual(plan['items'][0]['name'], 'new normalized requirement')
+                return AgentRunResult('FINAL_ANSWER ' + json.dumps(dict(
+                    status='completed', summary='ok', outputs={'plan': pipeline.execution_plan_file})), None, 0)
+            agent.agent_impl = MagicMock()
+            agent.agent_impl.run.side_effect = run
+            pipeline._send_task(agent, 'normalize', 'normalize')
+            plan = pipeline.execution_plan.read()
+            self.assertEqual(plan['items'][0]['name'], 'new normalized requirement')
+            self.assertEqual(plan['demand']['stage_attempts']['normalize'], 2)
+            self.assertEqual(plan['demand']['attempt_history']['normalize'][0]['attempt'], 1)
+
+
+    def test_deduplication_stays_within_owner_and_preserves_original_bytes(self):
+        from task_protocol import save_handoff
+        with tempfile.TemporaryDirectory() as root:
+            content = '中文\r\noriginal\n'
+            a = Path(save_handoff(Path(root) / 'R-001', 'review', content))
+            again = Path(save_handoff(Path(root) / 'R-001', 'feedback', content))
+            b = Path(save_handoff(Path(root) / 'R-002', 'review', content))
+            self.assertEqual(a, again)
+            self.assertNotEqual(a, b)
+            self.assertEqual(a.read_bytes(), content.encode('utf-8'))
+
+    def test_overall_failure_task_stays_in_outer_handoffs(self):
+        from task_protocol import TaskRetryRequired
+        with tempfile.TemporaryDirectory() as root:
+            pipeline = self.pipeline_fixture(root)
+            agent = MagicMock()
+            agent.last_run_result = None
+            agent.send_message.side_effect = RuntimeError('connection failed')
+            with self.assertRaises(TaskRetryRequired):
+                pipeline._send_task(agent, 'overall split', 'breakdown')
+            saved = pipeline._pending_receipt('breakdown', None)
+            self.assertEqual(Path(saved['task_path']).parent,
+                             (Path(pipeline.requirements_dir) / 'handoffs').resolve())
+
+    def test_handoff_scope_separates_item_from_overall_inputs(self):
+        with tempfile.TemporaryDirectory() as root:
+            pipeline = self.pipeline_fixture(root)
+            item = pipeline._load_items()[0]
+            message = pipeline._handoff('feedback', 'item feedback', item)
+            item_file = Path(message.removeprefix('请读取文档：'))
+            self.assertEqual(item_file.parent, (Path(pipeline._item_paths(item)['workspace']) / 'handoffs').resolve())
+            self.assertFalse((Path(pipeline.requirements_dir) / 'handoffs').exists())
+            global_file = Path(pipeline._handoff('user_idea', 'global input').removeprefix('请读取文档：'))
+            self.assertEqual(global_file.parent, (Path(pipeline.requirements_dir) / 'handoffs').resolve())
+
+    def test_same_item_review_reuses_context_snapshot_despite_different_label(self):
+        from task_protocol import save_handoff
+        with tempfile.TemporaryDirectory() as root:
+            pipeline = self.pipeline_fixture(root)
+            item = pipeline._load_items()[0]
+            paths = pipeline._item_paths(item)
+            context = CodeReviewContext(item.requirement_id, paths)
+            response = 'FINAL_ANSWER {"status":"changes_requested","summary":"CR-001"}'
+            context.record_review(response)
+            expected = context.state['previous_review']['response_path']
+            actual = pipeline._handoff('review', response, item).removeprefix('请读取文档：')
+            self.assertEqual(actual, expected)
+            self.assertEqual(save_handoff(paths['workspace'], 'feedback', response), expected)
+            copies = [p for p in Path(root).rglob('*.txt') if p.read_text() == response]
+            self.assertEqual(len(copies), 1)
+
+    def test_failed_item_task_is_local_and_legacy_recovery_path_is_preserved(self):
+        from task_protocol import TaskRetryRequired
+        with tempfile.TemporaryDirectory() as root:
+            pipeline = self.pipeline_fixture(root)
+            item = pipeline._load_items()[0]
+            agent = MagicMock()
+            agent.last_run_result = None
+            agent.send_message.side_effect = RuntimeError('network failed')
+            with self.assertRaises(TaskRetryRequired):
+                pipeline._send_task(agent, 'original task', 'development', item)
+            saved = pipeline._pending_receipt('development', item.requirement_id)
+            task = Path(saved['task_path'])
+            self.assertEqual(task.parent, (Path(pipeline._item_paths(item)['workspace']) / 'handoffs').resolve())
+            legacy = Path(pipeline.requirements_dir) / 'handoffs/producer-task-old.txt'
+            legacy.parent.mkdir()
+            legacy.write_bytes(task.read_bytes())
+            saved['task_path'] = str(legacy)
+            pipeline._save_pending_receipt('development', item.requirement_id, saved)
+            restarted = BreakPipeline(root, skip_human=True)
+            with self.assertRaises(TaskRetryRequired):
+                restarted._send_task(agent, 'retry', 'development', restarted._load_items()[0])
+            self.assertEqual(restarted._pending_receipt('development', item.requirement_id)['task_path'], str(legacy))
+            self.assertIn(str(legacy), agent.send_message.call_args.args[0])
+            self.assertTrue(task.is_file())
+            self.assertTrue(legacy.is_file())
+
+    def test_device_entry_is_in_each_execution_turn_only_for_allowed_stages(self):
+        for stage in ('development', 'code_review', 'analysis', 'requirements_review', 'memory_development'):
+            with self.subTest(stage=stage), tempfile.TemporaryDirectory() as root:
+                pipeline = self.pipeline_fixture(root)
+                item = pipeline._load_items()[0]
+                agent = MagicMock()
+                status = 'approved' if stage.endswith('review') else 'completed'
+                agent.send_message.return_value = 'FINAL_ANSWER ' + json.dumps(dict(status=status, summary='ok', outputs={}))
+                pipeline._send_task(agent, '执行本轮任务', stage, item)
+                task = agent.send_message.call_args.args[0]
+                if stage in {'development', 'code_review'}:
+                    self.assertIn('python3 scripts/android_emulator.py', task)
+                    self.assertIn('SKILL.md 所在目录', task)
+                    self.assertIn('覆盖旧会话', task)
+                else:
+                    self.assertNotIn('android_emulator.py', task)
+                    self.assertIn('不启动模拟器', task)
+
+    def test_development_and_code_review_use_analysis_as_primary_requirement_input(self):
+        with tempfile.TemporaryDirectory() as root:
+            pipeline = self.pipeline_fixture(root)
+            item = pipeline._load_items()[0]
+            paths = pipeline._item_paths(item)
+            for stage in ('development', 'code_review'):
+                inputs, _, _ = pipeline._task_paths(stage, item)
+                self.assertIn(paths['requirements_analysis'], inputs)
+                self.assertNotIn(paths['requirements'], inputs)
+                self.assertIn(paths['code_review'], inputs)
+            for stage in ('analysis', 'requirements_review'):
+                inputs, _, _ = pipeline._task_paths(stage, item)
+                self.assertIn(paths['requirements'], inputs)
+
+    def test_material_entry_is_forwarded_without_requiring_ui_on_every_task(self):
+        with tempfile.TemporaryDirectory() as root:
+            pipeline = self.pipeline_fixture(root)
+            item = pipeline._load_items()[0]
+            workspace = Path(pipeline._item_paths(item)['workspace'])
+            for stage in ('analysis', 'requirements_review', 'development', 'code_review'):
+                inputs, outputs, _ = pipeline._task_paths(stage, item)
+                self.assertIn(str(workspace / 'figma_assets/asset_manifest.json'), inputs)
+                self.assertIn(str(Path(pipeline.requirements_dir) / '_figma_inventory.json'), inputs)
+                self.assertNotIn(str(workspace / 'figma_assets/asset_manifest.json'), outputs)
+            self.assertFalse((workspace / 'figma_assets').exists())
+
+    def test_producer_success_keeps_only_counters_and_formal_reports(self):
+        from agents import Agent
+        from agents._result import AgentRunResult
+        from unittest.mock import patch
+        for stage in ('analysis', 'development', 'memory_analysis', 'memory_development', 'breakdown', 'normalize', 'summary'):
+            with self.subTest(stage=stage), tempfile.TemporaryDirectory() as root:
+                pipeline = self.pipeline_fixture(root)
+                item = None if stage in ('breakdown', 'normalize', 'summary') else pipeline._load_items()[0]
+                _, outputs, _ = pipeline._task_paths(stage, item)
+                report = Path(outputs[0])
+                if stage != 'normalize':
+                    report.write_text('verified facts')
+                before = set(Path(pipeline.requirements_dir).rglob('*.txt'))
+                with patch.object(Agent, '_load_system_prompt', return_value=''):
+                    agent = Agent('记忆', 'item_developer.md', root, agent_type='cursor')
+                agent.agent_impl = MagicMock()
+                agent.agent_impl.run.return_value = AgentRunResult('FINAL_ANSWER ' + json.dumps(dict(
+                    status='completed', summary='done', outputs={'report': str(report)})), None, 0)
+                pipeline._send_task(agent, '整理记忆', stage, item)
+                state = pipeline.execution_plan._agent_session_target(pipeline.execution_plan.read(), item.requirement_id if item else None)
+                self.assertNotIn(stage, state.get('attempt_history', {}))
+                self.assertEqual(state['stage_attempts'][stage], 1)
+                self.assertEqual(set(Path(pipeline.requirements_dir).rglob('*.txt')), before)
+                if stage != 'normalize':
+                    self.assertEqual(report.read_text(), 'verified facts')
+
+    def test_failures_use_plan_and_recovery_keeps_existing_files(self):
+        from agents import Agent
+        from agents._result import AgentRunResult
+        from task_protocol import TaskRetryRequired
+        from unittest.mock import patch
+        for stage in ('analysis', 'development', 'memory_analysis', 'memory_development'):
+            for failed in (AgentRunResult('invalid receipt', None, 0),
+                           AgentRunResult('', None, 1, 'startup failed')):
+                with self.subTest(stage=stage, failed=failed), tempfile.TemporaryDirectory() as root:
+                    pipeline = self.pipeline_fixture(root)
+                    item = pipeline._load_items()[0]
+                    _, outputs, _ = pipeline._task_paths(stage, item)
+                    report = Path(outputs[0])
+                    report.write_text('existing facts')
+                    with patch.object(Agent, '_load_system_prompt', return_value=''):
+                        agent = Agent('记忆', 'item_developer.md', root, agent_type='cursor')
+                    agent.agent_impl = MagicMock()
+                    agent.agent_impl.run.return_value = failed
+                    with self.assertRaises(TaskRetryRequired):
+                        pipeline._send_task(agent, '整理记忆', stage, item)
+                    state = pipeline.execution_plan.read()['items'][0]
+                    entry = state['attempt_history'][stage][0]
+                    failures = state['attempt_history'][stage]
+                    expected_failures = 2 if failed.returncode == 0 else 1
+                    self.assertEqual(len(failures), expected_failures)
+                    self.assertEqual(agent.agent_impl.run.call_count, expected_failures)
+                    self.assertNotIn('log_path', entry)
+                    self.assertNotIn('outputs', entry)
+                    self.assertEqual(entry['exit_code'], failed.returncode)
+                    self.assertIn('缺少 FINAL_ANSWER' if failed.returncode == 0 else 'startup failed', entry['error'])
+                    pending = state['pending_receipts'][stage]
+                    self.assertNotIn('log_path', pending)
+                    if failed.returncode == 0:
+                        self.assertEqual(pending['raw_receipt'], failed.text)
+                    else:
+                        self.assertNotIn('raw_receipt', pending)
+                    self.assertFalse(list(Path(pipeline.requirements_dir).rglob('call-*.txt')))
+                    self.assertTrue(Path(state['pending_receipts'][stage]['task_path']).is_file())
+                    saved = {p: p.read_bytes() for p in Path(pipeline.requirements_dir).rglob('*.txt')}
+                    agent.agent_impl.run.return_value = AgentRunResult('FINAL_ANSWER ' + json.dumps(dict(
+                        status='completed', summary='done', outputs={'report': str(report)})), None, 0)
+                    restarted = BreakPipeline(root)
+                    restarted._send_task(agent, '整理记忆', stage, restarted._load_items()[0])
+                    state = restarted.execution_plan.read()['items'][0]
+                    self.assertEqual(state['attempt_history'][stage], failures)
+                    self.assertEqual(state['stage_attempts'][stage], expected_failures + 1)
+                    self.assertNotIn(stage, state.get('pending_receipts', {}))
+                    self.assertEqual({p: p.read_bytes() for p in Path(pipeline.requirements_dir).rglob('*.txt')}, saved)
+
+    def test_review_keeps_decision_without_duplicate_receipts_or_reports(self):
+        for stage in ('requirements_review', 'code_review', 'breakdown_review'):
+            with self.subTest(stage=stage), tempfile.TemporaryDirectory() as root:
+                pipeline = self.pipeline_fixture(root)
+                pipeline._record_attempt(stage, 'R-001', 'approved', 'receipt')
+                entry = pipeline.execution_plan.read()['items'][0]['attempt_history'][stage][0]
+                self.assertEqual(entry, {'attempt': 0, 'kind': 'approved'})
+                self.assertFalse(list(Path(pipeline.requirements_dir).rglob('*.txt')))
+
     def test_breakdown_failure_before_index_resumes_without_user_input(self):
         from unittest.mock import patch
         from task_protocol import TaskRetryRequired
@@ -56,7 +363,12 @@ class FileHandoffTests(unittest.TestCase):
                 self.assertIsInstance(task, TaskMessage)
                 self.assertIn(task_path, task)
                 self.assertIn('继续未完成', task)
-                self.assertNotIn('仅根据调用日志', task)
+                self.assertNotIn('仅根据恢复记录', task)
+                if stage == 'development':
+                    self.assertIn('android_emulator.py', task)
+                    self.assertIn('覆盖旧会话', task)
+                else:
+                    self.assertNotIn('android_emulator.py', task)
                 self.assertEqual(restarted.execution_plan.get_stage_attempt(stage, rid), 2)
                 self.assertIsNone(restarted._pending_receipt(stage, rid))
 
@@ -117,9 +429,42 @@ class FileHandoffTests(unittest.TestCase):
             summary='FINAL_ANSWER 已补正', outputs={}), ensure_ascii=False)
         for prefix in ('正在写入报告。', '只做回执补正：确认后再发合规 FINAL_ANSWER。'):
             self.assertEqual(validate_receipt(prefix + receipt, task, '.').splitlines()[0], 'FINAL_ANSWER')
-        for suffix in (' trailing text', '\nFINAL_ANSWER {broken}', '\nFINAL_ANSWER ' + json.dumps(dict(status='approved'))):
+        for suffix in (' trailing text', 'WWL1B 大需求拆分已完成。', '\n无需再跟进。' * 1000):
+            with self.subTest(suffix=suffix[:40]):
+                self.assertEqual(validate_receipt('写入报告。' + receipt + suffix, task, '.'),
+                                 validate_receipt(receipt, task, '.'))
+        for suffix in ('\nFINAL_ANSWER {broken}', '\nFINAL_ANSWER ' + json.dumps(dict(status='approved'))):
             with self.subTest(suffix=suffix), self.assertRaises(ReceiptError):
                 validate_receipt('写入报告。' + receipt + suffix, task, '.')
+
+    def test_receipt_extraction_preserves_nested_json_and_escaped_text(self):
+        from task_protocol import parse_final_answer
+        data = dict(status='completed', summary='嵌套 { }、引号 "、换行\n与 FINAL_ANSWER 已补正',
+                    outputs={'report': 'requirements/report.md'})
+        body = json.dumps(data, ensure_ascii=False)
+        for wrapper in (body, '```json\n' + body + '\n```', '```\r\n' + body + '\r\n```'):
+            with self.subTest(wrapper=wrapper):
+                self.assertEqual(parse_final_answer('准备交付。FINAL_ANSWER\n' + wrapper + '任务已完成。'), data)
+
+    def test_receipt_extraction_rejects_broken_or_multiple_json_objects(self):
+        from task_protocol import parse_final_answer, ReceiptError
+        body = json.dumps(dict(status='approved', summary='done', outputs={}))
+        for suffix in (body[:-1], body + '\n' + body, '["approved"]',
+                       '```json\n' + body, '{broken}\n' + body):
+            with self.subTest(suffix=suffix), self.assertRaises(ReceiptError):
+                parse_final_answer('FINAL_ANSWER\n' + suffix)
+
+    def test_receipt_surrounding_prose_cannot_override_status_or_required_fields(self):
+        from task_protocol import TaskMessage, validate_receipt, ReceiptError
+        task = TaskMessage('审核', [], [], '仅回执', {'approved', 'changes_requested'})
+        for data in ({'status': 'completed', 'summary': 'done', 'outputs': {}},
+                     {'status': 'approved', 'outputs': {}},
+                     {'status': 'approved', 'summary': 'done'}):
+            with self.subTest(data=data), self.assertRaises(ReceiptError):
+                validate_receipt('approved FINAL_ANSWER\n' + json.dumps(data) + '任务完成', task, '.')
+        data = dict(status='changes_requested', summary='需修复', outputs={})
+        normalized = validate_receipt('FINAL_ANSWER\n' + json.dumps(data) + 'approved 任务完成', task, '.')
+        self.assertFalse(review_passed(normalized))
 
     def test_producer_correction_failure_is_persisted_and_resumes_without_development(self):
         from task_protocol import ReceiptError, ReceiptPending, TaskRetryRequired
@@ -131,7 +476,8 @@ class FileHandoffTests(unittest.TestCase):
                 dev = MagicMock()
                 original_log = Path(root) / 'original.txt'
                 original_log.write_text('original execution evidence')
-                dev.last_log_path = str(original_log)
+                pipeline._save_pending_receipt('development', 'R-001', dict(
+                    log_path=str(original_log), task_path=str(original_log)))
                 dev.send_message.side_effect = [ReceiptError('缺少 FINAL_ANSWER'), failure]
                 with self.assertRaises(ReceiptPending):
                     pipeline._send_task(dev, '实现登录', 'development', item)
@@ -154,7 +500,7 @@ class FileHandoffTests(unittest.TestCase):
                 restarted._send_task(dev, '实现登录', 'development', restarted._load_items()[0])
                 dev.send_message.assert_called_once()
                 prompt = dev.send_message.call_args.args[0]
-                self.assertIn('仅根据调用日志', prompt)
+                self.assertIn('仅根据恢复记录', prompt)
                 self.assertIn(str(original_log), prompt)
                 self.assertNotIn('实现登录', prompt)
                 self.assertNotIn('development', restarted.execution_plan.read()['items'][0].get('pending_receipts', {}))
@@ -178,7 +524,7 @@ class FileHandoffTests(unittest.TestCase):
             with self.assertRaises(ReceiptPending):
                 pipeline._run_item(item, dev, reviewer)
             reviewer.send_message.assert_not_called()
-            self.assertEqual(dev.agent_impl.run.call_count, 1)
+            self.assertEqual(dev.agent_impl.run.call_count, 2)
             restarted = BreakPipeline(root, skip_human=True)
             dev.agent_impl.run.reset_mock()
             dev.agent_impl.run.return_value = AgentRunResult('报告已写入。FINAL_ANSWER\n' + json.dumps(dict(
@@ -186,9 +532,32 @@ class FileHandoffTests(unittest.TestCase):
             reviewer.send_message.return_value = 'FINAL_ANSWER {"status":"approved","summary":"ok"}'
             restarted._run_item(restarted._load_items()[0], dev, reviewer)
             dev.agent_impl.run.assert_called_once()
-            self.assertIn('仅根据调用日志', dev.agent_impl.run.call_args.kwargs['message'])
+            self.assertIn('仅根据恢复记录', dev.agent_impl.run.call_args.kwargs['message'])
             reviewer.send_message.assert_called_once()
             self.assertEqual(restarted.execution_plan.read()['items'][0]['status'], '记忆整理中')
+
+    def test_developer_receipt_with_closing_summary_reaches_review_without_retry(self):
+        from agents import Agent
+        from agents._result import AgentRunResult
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as root:
+            pipeline = self.pipeline_fixture(root)
+            pipeline._set_status('R-001', '待开发')
+            item = pipeline._load_items()[0]
+            report = Path(pipeline._item_paths(item)['develop'])
+            report.write_text('completed work and evidence')
+            with patch.object(Agent, '_load_system_prompt', return_value=''):
+                dev = Agent('开发', 'item_developer.md', root, agent_type='cursor')
+            dev.agent_impl = MagicMock()
+            dev.agent_impl.run.return_value = AgentRunResult(
+                '正在写报告。FINAL_ANSWER\n' + json.dumps(dict(status='completed',
+                    summary='done', outputs={'report': str(report)})) + '开发已完成，无需再跟进。', None, 0)
+            reviewer = MagicMock()
+            reviewer.send_message.return_value = 'FINAL_ANSWER {"status":"approved","summary":"ok"}'
+            pipeline._run_item(item, dev, reviewer)
+            dev.agent_impl.run.assert_called_once()
+            reviewer.send_message.assert_called_once()
+            self.assertEqual(pipeline.execution_plan.read()['items'][0]['status'], '记忆整理中')
 
     def test_normalizer_recovery_does_not_restore_cleared_pending_record(self):
         from unittest.mock import patch
@@ -200,7 +569,7 @@ class FileHandoffTests(unittest.TestCase):
             normalizer.send_message.return_value = 'FINAL_ANSWER {"status":"completed","approval_token":"","summary":"done","outputs":{}}'
             with patch.object(pipeline, '_create_agent', return_value=normalizer):
                 pipeline._ensure_execution_plan()
-            self.assertIn('仅根据调用日志', normalizer.send_message.call_args.args[0])
+            self.assertIn('仅根据恢复记录', normalizer.send_message.call_args.args[0])
             self.assertIsNone(pipeline._pending_receipt('normalize', None))
 
     def test_existing_index_resumes_pending_breaker_before_review(self):
@@ -215,7 +584,7 @@ class FileHandoffTests(unittest.TestCase):
             with patch.object(pipeline, '_create_agent', side_effect=[breaker, reviewer]):
                 pipeline._run_breakdown()
             self.assertEqual(calls, ['breaker', 'reviewer'])
-            self.assertIn('仅根据调用日志', breaker.send_message.call_args.args[0])
+            self.assertIn('仅根据恢复记录', breaker.send_message.call_args.args[0])
             self.assertIsNone(pipeline._pending_receipt('breakdown', None))
 
     def pipeline_fixture(self, root, attempts=0):
@@ -291,9 +660,82 @@ class FileHandoffTests(unittest.TestCase):
             self.assertIn('本轮为回执补正', calls[1].args[0])
             self.assertIn('本轮为回执补正', calls[2].args[0])
             record = pipeline.execution_plan.read()['items'][0]
-            self.assertIn(record['attempt_history']['code_review'][0]['log_path'], calls[2].args[0])
+            self.assertIn(pipeline.execution_plan_file, calls[2].args[0])
+            self.assertIsNone(pipeline._pending_receipt('code_review', 'R-001'))
             self.assertEqual(record['stage_attempts']['code_review'], 10)
             dev.send_message.assert_not_called()
+
+    def test_bounded_receipt_survives_transport_failure_and_is_cleared_on_success(self):
+        from agents import Agent
+        from agents._result import AgentRunResult
+        from task_protocol import TaskRetryRequired
+        from unittest.mock import patch
+        for stage in ('development', 'requirements_review', 'code_review', 'breakdown_review'):
+            with self.subTest(stage=stage), tempfile.TemporaryDirectory() as root:
+                pipeline = self.pipeline_fixture(root)
+                item = None if stage == 'breakdown_review' else pipeline._load_items()[0]
+                rid = item.requirement_id if item else None
+                _, outputs, _ = pipeline._task_paths(stage, item)
+                for output in outputs:
+                    Path(output).write_text('formal evidence')
+                with patch.object(Agent, '_load_system_prompt', return_value=''):
+                    agent = Agent('test', 'unused.md', root, agent_type='cursor')
+                agent.agent_impl = MagicMock()
+                agent.agent_impl.run.return_value = AgentRunResult('receipt start ' + 'x' * 20000 + ' receipt end', None, 0)
+                with self.assertRaises(TaskRetryRequired):
+                    pipeline._send_task(agent, 'original task', stage, item)
+                saved = pipeline._pending_receipt(stage, rid)
+                self.assertEqual(len(saved['raw_receipt']), 4096)
+                self.assertTrue(saved['raw_receipt'].startswith('receipt start'))
+                self.assertTrue(saved['raw_receipt'].endswith('receipt end'))
+                self.assertIn('已截断', saved['raw_receipt'])
+                # run() raises before producing a result: no stale exit code or
+                # previous turn's payload may be attributed to this invocation.
+                agent.agent_impl.run.side_effect = RuntimeError('network ' + 'y' * 20000 + ' timeout')
+                pipeline = BreakPipeline(root)
+                with self.assertRaises(TaskRetryRequired):
+                    pipeline._send_task(agent, 'original task', stage, item)
+                pending = pipeline._pending_receipt(stage, rid)
+                self.assertEqual(pending['raw_receipt'], saved['raw_receipt'])
+                self.assertEqual(pending['receipt_error'], saved['receipt_error'])
+                self.assertLessEqual(len(pending['last_error']), 1000)
+                self.assertTrue(pending['last_error'].endswith('timeout'))
+                state = pipeline.execution_plan._agent_session_target(pipeline.execution_plan.read(), rid)
+                self.assertNotIn('exit_code', state['attempt_history'][stage][-1])
+                agent.agent_impl.run.side_effect = None
+                agent.agent_impl.run.return_value = AgentRunResult('FINAL_ANSWER ' + json.dumps(dict(
+                    status='completed' if stage == 'development' else 'approved', summary='ok',
+                    outputs={str(i): path for i, path in enumerate(outputs)})), None, 0)
+                pipeline._send_task(agent, 'original task', stage, item)
+                self.assertIsNone(pipeline._pending_receipt(stage, rid))
+                self.assertNotIn('receipt start', Path(pipeline.execution_plan_file).read_text())
+                self.assertFalse(list(Path(pipeline.requirements_dir).rglob('call-*.txt')))
+                self.assertFalse(list(Path(pipeline.requirements_dir).rglob('review-result-*.txt')))
+                self.assertFalse(list(Path(pipeline.requirements_dir).rglob('report-snapshot-*.txt')))
+
+    def test_legacy_review_log_is_used_without_creating_new_log_files(self):
+        from task_protocol import TaskRetryRequired
+        with tempfile.TemporaryDirectory() as root:
+            pipeline = self.pipeline_fixture(root)
+            legacy = Path(pipeline.requirements_dir) / 'handoffs' / 'old-call.txt'
+            legacy.parent.mkdir()
+            legacy.write_text('original malformed receipt')
+            plan = pipeline.execution_plan.read()
+            plan['items'][0]['attempt_history'] = {'code_review': [dict(
+                attempt=1, kind='receipt_format_error', log_path=str(legacy), receipt_error='old error')]}
+            pipeline.execution_plan.write(plan)
+            reviewer = MagicMock()
+            reviewer.send_message.side_effect = RuntimeError('network timeout')
+            with self.assertRaises(TaskRetryRequired):
+                pipeline._send_task(reviewer, 'review', 'code_review', pipeline._load_items()[0])
+            pipeline = BreakPipeline(root)
+            reviewer.send_message.side_effect = None
+            reviewer.send_message.return_value = 'FINAL_ANSWER {"status":"approved","summary":"ok"}'
+            pipeline._send_task(reviewer, 'review', 'code_review', pipeline._load_items()[0])
+            self.assertIn(str(legacy), reviewer.send_message.call_args.args[0])
+            self.assertIn('old error', reviewer.send_message.call_args.args[0])
+            self.assertEqual(legacy.read_text(), 'original malformed receipt')
+            self.assertEqual(list(legacy.parent.iterdir()), [legacy])
 
     def test_large_documents_never_enter_review_message(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -332,8 +774,8 @@ class FileHandoffTests(unittest.TestCase):
                 validate_receipt(reply, task, root)
             Path(output).write_text('evidence')
             self.assertEqual(json.loads(validate_receipt(reply, task, root).split('\n', 1)[1])['status'], 'completed')
-            with self.assertRaises(ReceiptError):
-                validate_receipt(reply + ' trailing text', task, root)
+            self.assertEqual(validate_receipt(reply + ' trailing text', task, root),
+                             validate_receipt(reply, task, root))
 
     def test_no_unbounded_issue_details_in_final_answer(self):
         from task_protocol import TaskMessage, validate_receipt, ReceiptError
@@ -388,7 +830,8 @@ class FileHandoffTests(unittest.TestCase):
             with self.assertRaises(ReceiptError):
                 agent.send_message(TaskMessage('实现登录', [], [], '写报告', {'completed'}))
             self.assertEqual(agent.agent_impl.max_retries, 0)
-            self.assertEqual(Path(agent.last_log_path).read_text(), 'plain text')
+            self.assertEqual(agent.last_run_result.text, 'plain text')
+            self.assertFalse(list(Path(root).rglob('*.txt')))
 
     def test_long_blocker_url_stays_in_report_and_human_gate_reads_it(self):
         from task_protocol import TaskMessage, validate_receipt
@@ -418,7 +861,7 @@ class FileHandoffTests(unittest.TestCase):
             self.assertEqual(normalized['items'][0].get('attempt_history'), before['items'][0]['attempt_history'])
             self.assertEqual(normalized['demand'].get('attempt_history'), before['demand']['attempt_history'])
 
-    def test_every_review_stage_snapshots_reports(self):
+    def test_requirements_review_keeps_decision_without_generic_snapshot(self):
         with tempfile.TemporaryDirectory() as root:
             pipeline = self.pipeline_fixture(root, 0)
             item = pipeline._load_items()[0]
@@ -430,4 +873,5 @@ class FileHandoffTests(unittest.TestCase):
             pipeline._send_task(reviewer, '完整需求审核', 'requirements_review', item)
             output.write_text('next round')
             history = pipeline._last_attempt('requirements_review', 'R-001')
-            self.assertEqual(Path(history['outputs'][str(output)]).read_text(), 'original issues')
+            self.assertEqual(history, {'attempt': 1, 'kind': 'changes_requested'})
+            self.assertFalse(list(Path(pipeline.requirements_dir).rglob('report-snapshot-*.txt')))

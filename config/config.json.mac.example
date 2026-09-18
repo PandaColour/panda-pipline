@@ -1,0 +1,132 @@
+{
+  "PROJECT_ROOT": "/Users/panda.colour/Company/ios-m6",
+  "REPOS": [
+    {
+      "url": "https://gitee.com/pandacolour/aiphone.git",
+      "branch": "main"
+    }
+  ],
+  "AGENT_TYPES": [
+    {
+      "role": "requirement_breaker",
+      "agent_type": "cursor"
+    },
+    {
+      "role": "breakdown_reviewer",
+      "agent_type": "cursor"
+    },
+    {
+      "role": "requirements_analyst",
+      "agent_type": "cursor"
+    },
+    {
+      "role": "requirements_reviewer",
+      "agent_type": "cursor"
+    },
+    {
+      "role": "developer",
+      "agent_type": "cursor"
+    },
+    {
+      "role": "code_reviewer",
+      "agent_type": "cursor"
+    }
+  ],
+  "EXTERNAL_CLI_TOOLS": [
+    {
+      "name": "android-cli",
+      "check": [
+        "android",
+        "--no-metrics",
+        "--version"
+      ],
+      "install": [
+        "brew",
+        "install",
+        "android/tap/android-cli"
+      ],
+      "check_timeout": 90,
+      "path_env": "PANDA_PIPELINE_ANDROID_CLI",
+      "verify": [
+        {
+          "command": [
+            "android",
+            "--no-metrics",
+            "layout",
+            "--help"
+          ],
+          "contains": [
+            "--full",
+            "--device"
+          ]
+        },
+        {
+          "command": [
+            "android",
+            "--no-metrics",
+            "screen",
+            "capture",
+            "--help"
+          ],
+          "contains": [
+            "--annotate",
+            "--device"
+          ]
+        },
+        {
+          "command": [
+            "android",
+            "--no-metrics",
+            "screen",
+            "resolve",
+            "--help"
+          ],
+          "contains": [
+            "--screenshot",
+            "--string"
+          ]
+        },
+        {
+          "command": [
+            "android",
+            "--no-metrics",
+            "run",
+            "--help"
+          ],
+          "contains": [
+            "--device",
+            "--apks"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "lark-cli",
+      "check": [
+        "lark-cli",
+        "--version"
+      ],
+      "install": [
+        "npx",
+        "--yes",
+        "@larksuite/cli@latest",
+        "install"
+      ]
+    }
+  ],
+  "EXTERNAL_SKILLS": [
+    {
+      "source": "larksuite/cli",
+      "names": [
+        "lark-shared",
+        "lark-doc",
+        "lark-wiki"
+      ],
+      "agents": [
+        "codex",
+        "claude-code",
+        "cursor"
+      ]
+    }
+  ]
+}

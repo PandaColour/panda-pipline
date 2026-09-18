@@ -3,10 +3,10 @@ import subprocess
 import sys
 import time
 
+from ._cli import executable_name
+from ._prompt_snapshot import check_command_length, freeze_system_prompt
 from ._result import AgentRunResult
 from ._retry import run_with_retry
-from ._cli import executable_name
-
 
 CODEX_BASE_CMD = [
     executable_name("codex"), "exec",
@@ -96,12 +96,13 @@ class CodexAgent:
             cmd = _codex_exec_cmd()
             prompt = message
             if system_prompt:
-                prompt = f"[SYSTEM PROMPT]\n{system_prompt}\n[/SYSTEM PROMPT]\n\n[USER PROMPT]\n{message}"
+                prompt = f"[SYSTEM PROMPT]\n{freeze_system_prompt(system_prompt)}\n[/SYSTEM PROMPT]\n\n[USER PROMPT]\n{message}"
             for directory in add_dirs or []:
                 cmd.extend(["--add-dir", directory])
         cmd.append("-")
 
         try:
+            check_command_length(cmd)
             process = subprocess.Popen(
                 cmd, cwd=work_dir, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT, text=True, encoding="utf-8", bufsize=1,

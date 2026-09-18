@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from break_pipeline import BreakPipeline
+from tests.test_figma_asset_prompts import prompt_contract
 
 
 BLOCKED = 'FINAL_ANSWER ' + json.dumps(dict(status='blocked', approval_token='', blocker=dict(
@@ -181,5 +182,5 @@ class ProgressivePromptTests(unittest.TestCase):
                 self.assertNotIn('"status":"blocked"', text)
                 self.assertIn('Mock/Stub/Fake', text)
                 self.assertIn('Agent 保守决策', text)
-                self.assertIn('按失败节点', text)
+                self.assertIn('仅对失败节点降级', prompt_contract(root / f'{name}.md'))
                 self.assertNotIn('不得擅自购买/创建环境', text)

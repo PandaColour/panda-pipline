@@ -4,9 +4,9 @@ import hashlib
 import json
 import re
 from pathlib import Path
-from uuid import uuid4
 
 MAX_FINAL_CHARS = 2048
+FINAL_MARKER_PATTERN = r'(?<!\w)FINAL_ANSWER(?=[\s:{])'
 FINAL_INSTRUCTION = (
     '先读取指定输入，完成本轮明确任务；详细分析、完整问题清单、测试证据和修改建议写入输出文档。'
     '返回前确认必需输出已写入。最终只输出 FINAL_ANSWER 后跟一个 JSON 对象，'
@@ -49,9 +49,9 @@ def parse_final_answer(response):
     if not isinstance(response, str):
         raise ReceiptError('缺少 FINAL_ANSWER')
     # Some CLI streams concatenate separate assistant messages without a newline.
-    # A marker may follow progress prose, but its suffix must still be exactly
-    # one bounded JSON object. Never approve from a keyword or partial JSON.
-    markers = list(re.finditer(r'(?<!\w)FINAL_ANSWER(?=[\s:{])', response))
+    # Extract a complete receipt even when progress or a closing summary surrounds
+    # it. Never infer success from prose or repair incomplete JSON.
+    markers = list(re.finditer(FINAL_MARKER_PATTERN, response))
     if not markers:
         raise ReceiptError('缺少 FINAL_ANSWER')
     error = None
@@ -65,19 +65,28 @@ def parse_final_answer(response):
 
 def _parse_final_suffix(response):
     final = response.strip()
-    if len(final) > MAX_FINAL_CHARS:
-        raise ReceiptError(f'FINAL_ANSWER 超过 {MAX_FINAL_CHARS} 字符（实际 {len(final)}）')
     body = final[len('FINAL_ANSWER'):].lstrip().removeprefix(':').lstrip()
-    if body.startswith('```json\n') and body.endswith('```'):
-        body = body[8:-3].strip()
-    elif body.startswith('```\n') and body.endswith('```'):
-        body = body[4:-3].strip()
+    fence = re.match(r'```(?:json)?[ \t]*\r?\n', body)
+    if fence:
+        body = body[fence.end():].lstrip()
     try:
-        result = json.loads(body)
+        result, end = json.JSONDecoder().raw_decode(body)
     except (ValueError, TypeError) as error:
         raise ReceiptError('FINAL_ANSWER 必须是单个完整 JSON 对象') from error
     if not isinstance(result, dict):
         raise ReceiptError('FINAL_ANSWER 必须是 JSON 对象')
+    # Bound the extracted receipt, not unrelated CLI progress/closing prose.
+    size = len('FINAL_ANSWER\n') + end
+    if size > MAX_FINAL_CHARS:
+        raise ReceiptError(f'FINAL_ANSWER 超过 {MAX_FINAL_CHARS} 字符（实际 {size}）')
+    tail = body[end:].lstrip()
+    if fence:
+        if not tail.startswith('```'):
+            raise ReceiptError('FINAL_ANSWER JSON 代码围栏未闭合')
+        tail = tail[3:].lstrip()
+    # Do not treat a second payload or a later broken receipt as closing prose.
+    if tail.startswith(('{', '[', '```')) or re.search(FINAL_MARKER_PATTERN, tail):
+        raise ReceiptError('FINAL_ANSWER 后存在额外 JSON 或回执')
     return result
 
 
@@ -138,20 +147,20 @@ def read_resource_blocker(result, root):
 
 
 def save_handoff(directory, name, content):
-    """Immutable file handoff; neither feedback nor business sources enter argv."""
+    """Immutable, content-deduplicated handoff within its owning directory."""
     text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False, indent=2)
-    digest = hashlib.sha256(text.encode()).hexdigest()
+    encoded = text.encode('utf-8')
+    digest = hashlib.sha256(encoded).hexdigest()
     path = Path(directory) / 'handoffs' / f'{name}-{digest}.txt'
     path.parent.mkdir(parents=True, exist_ok=True)
+    # ReviewContext and the scheduler may label the same receipt differently.
+    # Reuse the existing snapshot; never move files referenced by older tasks.
+    for existing in sorted(path.parent.glob(f'*-{digest}.txt')):
+        if existing.is_file() and existing.read_bytes() == encoded:
+            return str(existing.resolve())
     if not path.exists():
-        path.write_text(text, encoding='utf-8')
+        path.write_bytes(encoded)
     return str(path.resolve())
-
-
-def save_call_log(root, agent_name, text):
-    # Unique per physical invocation, including new sessions and process failures.
-    name = hashlib.sha256(agent_name.encode()).hexdigest()[:12]
-    return save_handoff(Path(root) / 'requirements', f'call-{name}-{uuid4().hex}', text)
 
 
 def failure_kind(error):

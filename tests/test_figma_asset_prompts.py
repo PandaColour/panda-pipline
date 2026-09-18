@@ -1,3 +1,4 @@
+import re
 import unittest
 from pathlib import Path
 
@@ -34,19 +35,46 @@ ITEM_REQUIREMENTS_REVIEWER_PROMPTS = [
 ]
 
 
+def prompt_contract(path):
+    """Check preserved rules through the role's explicit skill entrypoints."""
+    content = path.read_text(encoding="utf-8")
+    seen = set()
+
+    def read_reference(path):
+        path = path.resolve()
+        if path in seen:
+            return ''
+        seen.add(path)
+        text = path.read_text(encoding="utf-8")
+        refs = re.findall(r'\]\(([^)]+\.md)\)', text)
+        return text + ''.join(read_reference(path.parent / ref) for ref in refs if '://' not in ref)
+
+    names = set(re.findall(r'`(panda-pipeline-[a-z-]+)`', content))
+    return content + ''.join(read_reference(ROOT / 'skills' / name / 'SKILL.md') for name in sorted(names))
+
+
 class FigmaAssetPromptTests(unittest.TestCase):
     def test_all_ui_roles_share_scoped_selection_and_motion_contract(self):
         for path in Figma_ANALYSIS_PROMPTS + DEVELOPER_PROMPTS + REVIEWER_PROMPTS:
-            content = path.read_text(encoding="utf-8")
+            content = prompt_contract(path)
             for term in ("不是下载清单", "exportSettings", "selection_evidence",
-                         "required=false", "decision=pending", "animation_evidence", "schema_version: 2"):
+                         "required=false", "decision=pending", "animation_evidence", "schema_version: 3"):
                 self.assertIn(term, content, path.name)
             self.assertNotIn("同类全库检查", content, path.name)
+
+    def test_all_ui_roles_share_document_independent_material_entry(self):
+        for path in Figma_ANALYSIS_PROMPTS + DEVELOPER_PROMPTS + REVIEWER_PROMPTS:
+            content = prompt_contract(path)
+            for term in ('物料入口', '唯一维护入口', 'frames[].design_source',
+                         'sha256', 'legacy_requirements', '相对所属小需求目录'):
+                self.assertIn(term, content, path.name)
+            self.assertNotIn('迁移至 schema_version: 2', content, path.name)
+            self.assertNotIn('在每个子需求的 `user_requirements.md` 中写入”物料映射表”', content, path.name)
 
     def test_ui_roles_cover_both_platforms_and_complete_state_manifest(self):
         ui_roles = ITEM_ANALYST_PROMPTS + DEVELOPER_PROMPTS + REVIEWER_PROMPTS
         for prompt_file in ui_roles:
-            content = prompt_file.read_text(encoding="utf-8")
+            content = prompt_contract(prompt_file)
             self.assertIn("Android", content, prompt_file.name)
             self.assertIn("iOS", content, prompt_file.name)
             self.assertIn("页面/状态矩阵", content, prompt_file.name)
@@ -64,30 +92,30 @@ class FigmaAssetPromptTests(unittest.TestCase):
             "失败节点",
         ]
         for prompt_file in ITEM_ANALYST_PROMPTS + DEVELOPER_PROMPTS + REVIEWER_PROMPTS:
-            content = prompt_file.read_text(encoding="utf-8")
+            content = prompt_contract(prompt_file)
             for term in required_terms:
                 self.assertIn(term, content, prompt_file.name)
 
         for prompt_file in DEVELOPER_PROMPTS + REVIEWER_PROMPTS:
-            content = prompt_file.read_text(encoding="utf-8")
+            content = prompt_contract(prompt_file)
             self.assertIn("当前构建截图", content, prompt_file.name)
 
     def test_developers_and_reviewers_reject_partial_visual_evidence(self):
         for prompt_file in DEVELOPER_PROMPTS + REVIEWER_PROMPTS:
-            content = prompt_file.read_text(encoding="utf-8")
+            content = prompt_contract(prompt_file)
             self.assertIn("不得仅抽样", content, prompt_file.name)
             self.assertIn("声明值", content, prompt_file.name)
             self.assertIn("截图证据", content, prompt_file.name)
 
     def test_breakdown_prompts_preserve_platform_state_and_node_metadata(self):
         for prompt_file in BREAKDOWN_PROMPTS:
-            content = prompt_file.read_text(encoding="utf-8")
+            content = prompt_contract(prompt_file)
             for term in ("平台列表", "状态列表", "Figma node-id", "容差策略"):
                 self.assertIn(term, content, prompt_file.name)
 
     def test_requirement_prompts_require_local_assets_and_usage_mapping(self):
         for prompt_file in Figma_ANALYSIS_PROMPTS:
-            content = prompt_file.read_text(encoding="utf-8")
+            content = prompt_contract(prompt_file)
             self.assertIn("figma_assets/", content, prompt_file.name)
             self.assertIn("物料映射表", content, prompt_file.name)
 
@@ -99,33 +127,33 @@ class FigmaAssetPromptTests(unittest.TestCase):
             ROOT / "system-prompt" / "requirements_reviewer.md",
         ]
         for prompt_file in prompt_files:
-            content = prompt_file.read_text(encoding="utf-8")
+            content = prompt_contract(prompt_file)
             self.assertIn("图片物料", content, prompt_file.name)
             self.assertIn("下载到本地", content, prompt_file.name)
 
     def test_code_review_prompts_require_asset_reuse_review(self):
         for prompt_file in CODE_REVIEW_PROMPTS:
-            content = prompt_file.read_text(encoding="utf-8")
+            content = prompt_contract(prompt_file)
             self.assertIn("物料复用", content, prompt_file.name)
             self.assertIn("重复", content, prompt_file.name)
 
     def test_ui_prompts_make_get_figma_node_remote_first(self):
         prompt_files = Figma_ANALYSIS_PROMPTS + DEVELOPER_PROMPTS + REVIEWER_PROMPTS
         for prompt_file in prompt_files:
-            content = prompt_file.read_text(encoding="utf-8")
+            content = prompt_contract(prompt_file)
             self.assertIn("get_figma_node", content, prompt_file.name)
             self.assertIn("以远程 Figma 为准", content, prompt_file.name)
 
     def test_developer_prompts_require_remote_read_evidence_and_bounded_fallback(self):
         for prompt_file in DEVELOPER_PROMPTS:
-            content = prompt_file.read_text(encoding="utf-8")
+            content = prompt_contract(prompt_file)
             self.assertIn("Figma 远程读取记录", content, prompt_file.name)
             self.assertIn("不得静默降级", content, prompt_file.name)
             self.assertIn("仅对失败节点降级", content, prompt_file.name)
 
     def test_reviewer_prompts_reject_missing_remote_read_evidence(self):
         for prompt_file in REVIEWER_PROMPTS:
-            content = prompt_file.read_text(encoding="utf-8")
+            content = prompt_contract(prompt_file)
             self.assertIn("缺少远程读取证据", content, prompt_file.name)
             self.assertIn("changes_requested", content, prompt_file.name)
 
@@ -137,7 +165,7 @@ class FigmaAssetPromptTests(unittest.TestCase):
         ]
         prompt_files = Figma_ANALYSIS_PROMPTS + DEVELOPER_PROMPTS + REVIEWER_PROMPTS
         for prompt_file in prompt_files:
-            content = prompt_file.read_text(encoding="utf-8")
+            content = prompt_contract(prompt_file)
             for phrase in forbidden:
                 self.assertNotIn(phrase, content, prompt_file.name)
 
@@ -146,7 +174,7 @@ class FigmaAssetPromptTests(unittest.TestCase):
             ROOT / "break-system-prompt" / "requirement_breaker.md",
             ROOT / "break-system-prompt" / "requirement_break_reviewer.md",
         ]:
-            content = prompt_file.read_text(encoding="utf-8")
+            content = prompt_contract(prompt_file)
             self.assertIn("验收摘要", content, prompt_file.name)
             self.assertIn("顺序", content, prompt_file.name)
 
@@ -161,7 +189,7 @@ class FigmaAssetPromptTests(unittest.TestCase):
 
     def test_breakdown_prompts_require_manifest_agent_run_audit_and_full_mcp_coverage(self):
         for prompt_file in BREAKDOWN_PROMPTS:
-            content = prompt_file.read_text(encoding="utf-8")
+            content = prompt_contract(prompt_file)
             self.assertIn("asset_manifest.json", content, prompt_file.name)
             self.assertIn("figma_asset_audit.py", content, prompt_file.name)
             self.assertIn("全部 FRAME", content, prompt_file.name)
@@ -178,7 +206,7 @@ class FigmaAssetPromptTests(unittest.TestCase):
 
     def test_requirement_analysts_own_only_current_material_and_run_scoped_audit(self):
         for prompt_file in ITEM_ANALYST_PROMPTS:
-            content = prompt_file.read_text(encoding="utf-8")
+            content = prompt_contract(prompt_file)
             self.assertIn("asset_manifest.json", content, prompt_file.name)
             self.assertIn("figma_asset_audit.py", content, prompt_file.name)
             self.assertIn("--requirement-id", content, prompt_file.name)
@@ -196,7 +224,7 @@ class FigmaAssetPromptTests(unittest.TestCase):
 
     def test_developers_require_per_ac_figma_mcp_checklist_with_offline_reasons(self):
         for prompt_file in DEVELOPER_PROMPTS:
-            content = prompt_file.read_text(encoding="utf-8")
+            content = prompt_contract(prompt_file)
             self.assertIn("Figma MCP 使用清单", content, prompt_file.name)
             self.assertIn("develop_report.md", content, prompt_file.name)
             self.assertIn("每个", content, prompt_file.name)
@@ -209,7 +237,7 @@ class FigmaAssetPromptTests(unittest.TestCase):
 
     def test_code_reviewers_judge_checklist_reasons_without_offline_loop(self):
         for prompt_file in CODE_REVIEW_PROMPTS:
-            content = prompt_file.read_text(encoding="utf-8")
+            content = prompt_contract(prompt_file)
             self.assertIn("Figma MCP 使用清单", content, prompt_file.name)
             self.assertIn("未勾选", content, prompt_file.name)
             self.assertIn("理由", content, prompt_file.name)
@@ -222,7 +250,7 @@ class FigmaAssetPromptTests(unittest.TestCase):
 
     def test_requirement_reviewers_are_read_only_and_return_material_gaps_to_analyst(self):
         for prompt_file in ITEM_REQUIREMENTS_REVIEWER_PROMPTS:
-            content = prompt_file.read_text(encoding="utf-8")
+            content = prompt_contract(prompt_file)
             self.assertIn("只读运行", content, prompt_file.name)
             self.assertIn("figma_asset_audit.py", content, prompt_file.name)
             self.assertIn("禁止修改", content, prompt_file.name)
@@ -231,7 +259,7 @@ class FigmaAssetPromptTests(unittest.TestCase):
 
     def test_developers_can_supplement_scoped_materials_and_reaudit(self):
         for prompt_file in DEVELOPER_PROMPTS:
-            content = prompt_file.read_text(encoding="utf-8")
+            content = prompt_contract(prompt_file)
             self.assertIn("只读运行", content, prompt_file.name)
             self.assertIn("figma_asset_audit.py", content, prompt_file.name)
             self.assertIn("禁止修改", content, prompt_file.name)
@@ -244,7 +272,7 @@ class FigmaAssetPromptTests(unittest.TestCase):
 
     def test_code_reviewers_can_supplement_but_must_verify_implementation(self):
         for prompt_file in CODE_REVIEW_PROMPTS:
-            content = prompt_file.read_text(encoding="utf-8")
+            content = prompt_contract(prompt_file)
             self.assertIn("只读运行", content, prompt_file.name)
             self.assertIn("figma_asset_audit.py", content, prompt_file.name)
             self.assertIn("禁止修改", content, prompt_file.name)
@@ -259,7 +287,7 @@ class FigmaAssetPromptTests(unittest.TestCase):
 
     def test_export_tags_are_advisory_and_upstream_allows_later_supplements(self):
         for prompt_file in Figma_ANALYSIS_PROMPTS + DEVELOPER_PROMPTS + REVIEWER_PROMPTS:
-            content = prompt_file.read_text(encoding="utf-8")
+            content = prompt_contract(prompt_file)
             self.assertIn("可能多标或漏标", content, prompt_file.name)
             self.assertNotIn("是设计师交付意图的优先依据", content, prompt_file.name)
             self.assertIn("Developer 和 Code Reviewer 均允许", content, prompt_file.name)

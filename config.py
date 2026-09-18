@@ -1,22 +1,72 @@
 import json
 import os
+import re
 
 # Source repo root (where this config lives)
 SOURCE_REPO_DIR = os.path.dirname(os.path.abspath(__file__))
 SYSTEM_PROMPT_DIR = os.path.join(SOURCE_REPO_DIR, "system-prompt")
 
-# 代码静态扫描（detekt）规则文件：pipeline.py 与 break_pipeline.py 共用同一份配置，
-# 两个模块彼此独立，只共同依赖本配置模块。
-STATIC_ANALYSIS_DIR = os.path.join(SOURCE_REPO_DIR, "static-analysis")
-DETEKT_CONFIG_PATH = os.path.join(STATIC_ANALYSIS_DIR, "detekt.yml")
-
 PIPELINE_CONFIG_PATH = os.path.join(SOURCE_REPO_DIR, "config", "config.json")
+EXTERNAL_SKILL_AGENT_NAMES = {
+    'codex': 'Codex', 'claude-code': 'Claude Code', 'cursor': 'Cursor', 'opencode': 'OpenCode',
+}
 
 
 def _non_empty_string(value, field):
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{field} in config/config.json must be a non-empty string")
     return value
+
+
+def _string_array(value, field):
+    if not isinstance(value, list) or not value:
+        raise ValueError(f'{field} in config/config.json must be a non-empty string array')
+    for item in value:
+        _non_empty_string(item, field)
+
+
+def _external_dependencies(runtime_config, key):
+    entries = runtime_config.get(key, [])
+    if not isinstance(entries, list):
+        raise ValueError(f'{key} in config/config.json must be an array')
+    seen = set()
+    for index, entry in enumerate(entries):
+        field = f'{key}[{index}]'
+        if not isinstance(entry, dict):
+            raise ValueError(f'{field} in config/config.json must be an object')
+        if not isinstance(entry.get('enabled', True), bool):
+            raise ValueError(f'{field}.enabled must be boolean')
+        if key == 'EXTERNAL_CLI_TOOLS':
+            identity = _non_empty_string(entry.get('name'), f'{field}.name')
+            for command in ('check', 'install'):
+                _string_array(entry.get(command), f'{field}.{command}')
+            timeout = entry.get('check_timeout', 45)
+            if type(timeout) is not int or not 1 <= timeout <= 300:
+                raise ValueError(f'{field}.check_timeout must be an integer between 1 and 300')
+            path_env = entry.get('path_env')
+            if path_env is not None and (not isinstance(path_env, str) or not re.fullmatch(r'PANDA_PIPELINE_[A-Z0-9_]+', path_env)):
+                raise ValueError(f'{field}.path_env must use the PANDA_PIPELINE_ prefix')
+            checks = entry.get('verify', [])
+            if not isinstance(checks, list):
+                raise ValueError(f'{field}.verify must be an array')
+            for check in checks:
+                if not isinstance(check, dict):
+                    raise ValueError(f'{field}.verify entries must be objects')
+                _string_array(check.get('command'), f'{field}.verify.command')
+                _string_array(check.get('contains'), f'{field}.verify.contains')
+        else:
+            identity = _non_empty_string(entry.get('source'), f'{field}.source')
+            if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', identity) or identity.startswith('-'):
+                raise ValueError(f'{field}.source must use GitHub owner/repo format')
+            _string_array(entry.get('names'), f'{field}.names')
+            agents = entry.get('agents', ['codex', 'claude-code', 'cursor'])
+            _string_array(agents, f'{field}.agents')
+            if any(agent not in EXTERNAL_SKILL_AGENT_NAMES for agent in agents):
+                raise ValueError(f'{field}.agents contains an unsupported agent')
+        if identity in seen:
+            raise ValueError(f'Duplicate {field}: {identity}')
+        seen.add(identity)
+    return entries
 
 
 def _load_pipeline_config():
@@ -57,10 +107,12 @@ def _load_pipeline_config():
             )
         seen_roles.add(role)
 
-    return project_root, repos, agent_types
+    return (project_root, repos, agent_types,
+            _external_dependencies(runtime_config, 'EXTERNAL_CLI_TOOLS'),
+            _external_dependencies(runtime_config, 'EXTERNAL_SKILLS'))
 
 
-PROJECT_ROOT, REPOS, AGENT_TYPES = _load_pipeline_config()
+PROJECT_ROOT, REPOS, AGENT_TYPES, EXTERNAL_CLI_TOOLS, EXTERNAL_SKILLS = _load_pipeline_config()
 
 
 def get_agent_type(role):

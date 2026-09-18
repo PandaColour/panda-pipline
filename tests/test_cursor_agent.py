@@ -73,7 +73,10 @@ class CursorAgentTests(unittest.TestCase):
         self.assertEqual(cmd[0], "/usr/local/bin/agent")
         self.assertEqual(cmd[1:5], ["-p", "--force", "--output-format", "stream-json"])
         self.assertIn("--stream-partial-output", cmd)
-        self.assertEqual(cmd[-1], "[SYSTEM PROMPT]\nBe precise.\n[/SYSTEM PROMPT]\n\n[USER PROMPT]\nAnalyze this code")
+        self.assertNotIn("Be precise.", cmd[-1])
+        self.assertIn("先完整读取角色规则文件", cmd[-1])
+        self.assertIn("temp-prompt-skills", cmd[-1])
+        self.assertTrue(cmd[-1].endswith("[USER PROMPT]\nAnalyze this code"))
         self.assertEqual(popen.call_args.kwargs["cwd"], "/work/repo")
         self.assertNotIn("--resume", cmd)
         self.assertNotIn("--continue", cmd)
@@ -99,7 +102,9 @@ class CursorAgentTests(unittest.TestCase):
         self.assertIn("--resume", cmd)
         self.assertEqual(cmd[cmd.index("--resume") + 1], "cursor-chat")
         self.assertNotIn("--continue", cmd)
-        self.assertEqual(cmd[-1], "Continue task")
+        self.assertNotIn("ignored after first turn", cmd[-1])
+        self.assertIn("需要时重新读取", cmd[-1])
+        self.assertTrue(cmd[-1].endswith("[USER PROMPT]\nContinue task"))
         self.assertEqual(result, "continued")
 
     def test_uses_last_assistant_message_when_cursor_omits_result_event(self):

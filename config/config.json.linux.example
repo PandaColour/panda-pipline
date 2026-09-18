@@ -1,0 +1,134 @@
+{
+  "PROJECT_ROOT": "/home/your-user/Company/mobile-app",
+  "REPOS": [
+    {
+      "url": "https://gitee.com/pandacolour/aiphone.git",
+      "branch": "main"
+    }
+  ],
+  "AGENT_TYPES": [
+    {
+      "role": "requirement_breaker",
+      "agent_type": "cursor"
+    },
+    {
+      "role": "breakdown_reviewer",
+      "agent_type": "cursor"
+    },
+    {
+      "role": "requirements_analyst",
+      "agent_type": "cursor"
+    },
+    {
+      "role": "requirements_reviewer",
+      "agent_type": "cursor"
+    },
+    {
+      "role": "developer",
+      "agent_type": "cursor"
+    },
+    {
+      "role": "code_reviewer",
+      "agent_type": "cursor"
+    }
+  ],
+  "EXTERNAL_CLI_TOOLS": [
+    {
+      "name": "android-cli",
+      "check": [
+        "~/.local/bin/android",
+        "--no-metrics",
+        "--version"
+      ],
+      "install": [
+        "bash",
+        "-o",
+        "pipefail",
+        "-c",
+        "curl -fsSL --connect-timeout 15 --max-time 120 https://dl.google.com/android/cli/latest/linux_x86_64/install.sh | bash"
+      ],
+      "check_timeout": 90,
+      "path_env": "PANDA_PIPELINE_ANDROID_CLI",
+      "verify": [
+        {
+          "command": [
+            "~/.local/bin/android",
+            "--no-metrics",
+            "layout",
+            "--help"
+          ],
+          "contains": [
+            "--full",
+            "--device"
+          ]
+        },
+        {
+          "command": [
+            "~/.local/bin/android",
+            "--no-metrics",
+            "screen",
+            "capture",
+            "--help"
+          ],
+          "contains": [
+            "--annotate",
+            "--device"
+          ]
+        },
+        {
+          "command": [
+            "~/.local/bin/android",
+            "--no-metrics",
+            "screen",
+            "resolve",
+            "--help"
+          ],
+          "contains": [
+            "--screenshot",
+            "--string"
+          ]
+        },
+        {
+          "command": [
+            "~/.local/bin/android",
+            "--no-metrics",
+            "run",
+            "--help"
+          ],
+          "contains": [
+            "--device",
+            "--apks"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "lark-cli",
+      "check": [
+        "lark-cli",
+        "--version"
+      ],
+      "install": [
+        "npx",
+        "--yes",
+        "@larksuite/cli@latest",
+        "install"
+      ]
+    }
+  ],
+  "EXTERNAL_SKILLS": [
+    {
+      "source": "larksuite/cli",
+      "names": [
+        "lark-shared",
+        "lark-doc",
+        "lark-wiki"
+      ],
+      "agents": [
+        "codex",
+        "claude-code",
+        "cursor"
+      ]
+    }
+  ]
+}

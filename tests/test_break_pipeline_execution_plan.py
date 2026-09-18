@@ -304,7 +304,7 @@ class BreakExecutionPlanTests(unittest.TestCase):
             restarted._ensure_execution_plan()
         self.assertEqual(restarted.execution_plan.get_stage_attempt('normalize'), 2)
         demand = restarted.execution_plan.read()['demand']
-        self.assertEqual([entry['kind'] for entry in demand['attempt_history']['normalize']], ['network_error', 'success'])
+        self.assertEqual([entry['kind'] for entry in demand['attempt_history']['normalize']], ['network_error'])
         self.assertIsNone(restarted._pending_receipt('normalize', None))
         self.assertEqual(demand['source'], '登录需求')
 

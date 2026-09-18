@@ -1,15 +1,17 @@
 from pipeline_tasks import PipelineTaskMixin, CALL_FAILURE
 import os
+import subprocess
+import sys
 from agents import Agent
-from config import SYSTEM_PROMPT_DIR, get_agent_type
+from config import SOURCE_REPO_DIR, SYSTEM_PROMPT_DIR, get_agent_type
 from execution_plan import ExecutionPlanStore
 from review_decision import review_passed, structured_final_answer_decision
-from static_scan import resolve_scan_root, run_static_scan
 from workflow import human_gate
 from task_protocol import read_resource_blocker
 
 MAX_REQUIREMENT_REVIEW_ATTEMPTS = 10
-MEMORY_CURATION_PROMPT = "memory_curation.md"
+SYSTEM_COMMAND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "system-command")
+MEMORY_CURATION_COMMAND = "memory_curation.md"
 VALID_STATUSES = {
     "需求分析中",
     "需求评审中",
@@ -49,6 +51,7 @@ class Pipeline(PipelineTaskMixin):
         self.bug_report_file = os.path.join(self.requirement_dir, "bug_report.md")
         self.memory_report_file = os.path.join(self.requirement_dir, "memory_report.md")
         self.prompt_dir = SYSTEM_PROMPT_DIR
+        self.command_dir = SYSTEM_COMMAND_DIR
         self.agents = {}
 
     def _human_gate(self, stage_name, review_file_path=None, feedback_agent=None):
@@ -133,16 +136,6 @@ class Pipeline(PipelineTaskMixin):
         except (OSError, ValueError):
             return None
         return status if status in VALID_STATUSES else None
-
-    def _render_system_prompt(self, prompt_file, **values):
-        template_path = os.path.join(self.prompt_dir, prompt_file)
-        with open(template_path, encoding="utf-8") as template_file:
-            template = template_file.read()
-        try:
-            return template.format(**values)
-        except KeyError as error:
-            missing_key = error.args[0]
-            raise ValueError(f"Prompt template {prompt_file} missing placeholder value: {missing_key}") from error
 
     def run(self, user_idea=None):
         if self._active_requirements_complete():
@@ -290,6 +283,8 @@ class Pipeline(PipelineTaskMixin):
             analysis_prompt = (
                 f"请根据以下初始想法进行深度需求分析，创建{self.user_requirements_file},返回前确保文件创建成功"
                 f"请详细列出功能模块和技术栈选型。"
+                "AC 仅分逻辑/UI；混合要求在本需求内拆成独立编号的两类 AC，保留原始来源、页面/状态和优先级，不拆成两个开发阶段。增量调整保留未受影响编号，拆开既有项须记录旧新编号映射。"
+                "在既有 AC 描述或引用章节明确前置条件/状态、验证动作、观察对象与预期结果、基准定位及失败事实，不能只写截图对比或功能测试；共享步骤与基准可准确引用。"
                 f"{existing_context}"
                 f"初始想法：{self._handoff('user_idea', user_idea)}"
             )
@@ -306,6 +301,7 @@ class Pipeline(PipelineTaskMixin):
             review_prompt = (
                 f"请审查 {self.user_requirements_file} 文件中的需求分析，原始需求: {self._handoff('user_idea', user_idea)}"
                 f"评估其完整性、一致性和可行性。如果满意，最终回复按 FINAL_ANSWER JSON 协议输出 status=approved。"
+                "检查逻辑/UI 分类与实际断言一致，混合要求按角色规则拆开并保留来源和范围，两类安排独立验证。"
                 f"如果不满意，请提供具体的修改建议。"
             )
             for attempt in range(1, MAX_REQUIREMENT_REVIEW_ATTEMPTS + 1):
@@ -328,6 +324,7 @@ class Pipeline(PipelineTaskMixin):
                 review_prompt = (
                     f"请继续审查 {self.user_requirements_file} 文件中的需求分析,分析agent对它进行了一些修改"
                     f"评估其完整性、一致性和可行性。如果满意，最终回复按 FINAL_ANSWER JSON 协议输出 status=approved。"
+                    "在既有问题及直接影响项内检查逻辑/UI 分类与断言一致，混合要求按角色规则拆开并保留来源和范围，两类安排独立验证。"
                     f"如果不满意，请提供具体的修改建议。"
                 )
 
@@ -394,6 +391,7 @@ class Pipeline(PipelineTaskMixin):
                 develop_prompt = (
                     f"请先阅读 {self.user_requirements_file} 中的需求文档，"
                     f"然后编写代码实现。"
+                    "按逻辑/UI AC 分别实现和验证，报告保留编号、类型、证据和逐条结论；逻辑按需验证实际交互，UI 实际查看设计与运行图，不能相互代替。"
                     f"允许进行必要自测，并将自测命令和结果写入 {self.develop_report_file}。"
                     f"开发完成后，输出 {self.develop_report_file},返回前确保文件创建成功"
                 )
@@ -411,6 +409,7 @@ class Pipeline(PipelineTaskMixin):
                 f"执行必要测试，并将测试范围、命令、结果和遗留问题写入 {self.test_report_file}；"
                 f"如有 Bug 生成 {self.bug_report_file}。"
                 f"然后审查 {self.work_dir} 下的代码和测试。"
+                "按逻辑/UI AC 独立核验证据及结论；历史混合项在原编号下分记两类结果，不能以逻辑通过代替视觉通过。复审仅重验既有问题、直接回归和失效证据，保留其他有效结论。"
                 f"将代码审查结论写入 {self.code_review_file}。"
                 f"如果所有检查通过，最终回复按 FINAL_ANSWER JSON 协议输出 status=approved。"
                 f"否则请提供具体的修改建议。", 'code_review')
@@ -456,11 +455,13 @@ class Pipeline(PipelineTaskMixin):
         return False
 
     def _run_static_scan(self):
-        """多语言静态扫描（Kotlin/Java/Python/JS/TS/Swift），结果写入 static_scan_report.md。
-
-        具体实现见 static_scan 模块（pipeline.py 与 break_pipeline.py 共用，彼此独立）。
-        """
-        run_static_scan(resolve_scan_root(self.work_dir), self.static_scan_report_file)
+        """通过 skill 内的独立 CLI 生成扫描报告，不导入工具实现。"""
+        skill_dir = os.path.join(SOURCE_REPO_DIR, 'skills', 'panda-pipeline-static-analysis')
+        subprocess.run(
+            [sys.executable, os.path.join(skill_dir, 'scripts', 'static_scan.py'),
+             '--work-dir', self.work_dir, '--report', self.static_scan_report_file],
+            cwd=skill_dir, check=True,
+        )
 
     def _item_status(self):
         plan = self.execution_plan.read()
@@ -541,8 +542,8 @@ class Pipeline(PipelineTaskMixin):
             f"{self.test_report_file}、{self.code_review_file}、{self.static_scan_report_file}"
         )
         curation_messages = {
-            "需求分析": self._render_system_prompt(
-                MEMORY_CURATION_PROMPT,
+            "需求分析": self._render_command(
+                MEMORY_CURATION_COMMAND,
                 opening="收到记忆整理指令。",
                 read_instruction=f"请读取已验证产物：{report_paths}。",
                 curation_scope=(
@@ -552,8 +553,8 @@ class Pipeline(PipelineTaskMixin):
                 execution_plan_file=self.execution_plan_file,
                 closing_instruction="审查报告只作为证据输入；只可写调用指定的记忆文档与记忆报告；不得修改需求、既有审核报告、执行计划或源码。",
             ),
-            "代码开发": self._render_system_prompt(
-                MEMORY_CURATION_PROMPT,
+            "代码开发": self._render_command(
+                MEMORY_CURATION_COMMAND,
                 opening="收到记忆整理指令。",
                 read_instruction=f"请读取已验证产物：{report_paths} 以及当前代码。",
                 curation_scope=(

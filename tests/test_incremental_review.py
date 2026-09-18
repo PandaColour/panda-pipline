@@ -34,12 +34,28 @@ class IncrementalReviewTests(unittest.TestCase):
                         dependencies=[], requirements_file='R-001/user_requirements.md',
                         acceptance_summary='登录、退出')]))
         self.paths = self.pipeline._item_paths(self.item())
+        self.write('requirements_analysis', f'原始 AC 来源：{target}\n原始 AC 编号：R-001-AC-01、R-001-AC-02\n')
         self.dev, self.reviewer = MagicMock(), MagicMock()
         self.dev.send_message.return_value = '实现完成'
         self.reviewer.send_message.return_value = 'FINAL_ANSWER {"status": "approved", "approval_token": "任务完成", "summary": "任务完成", "outputs": {}}'
 
     def item(self):
         return self.pipeline._load_items()[0]
+
+    def test_review_entry_is_analysis_and_issues_are_recoverable_from_report(self):
+        context = CodeReviewContext('R-001', self.paths)
+        context.render()
+        payload_path = next((Path(self.paths['workspace']) / 'handoffs').glob('review-input-*.txt'))
+        payload = json.loads(payload_path.read_text())
+        self.assertEqual({'requirements_analysis': self.paths['requirements_analysis']},
+                         payload['required_acceptance_sources'])
+        self.write('code_review', '第 1 轮；CR-001 未关闭；AC-02 通过，证据 logout.log')
+        context.record_review('FINAL_ANSWER {"status":"changes_requested","summary":"见报告","outputs":{}}')
+        self.write('code_review', 'overwritten')
+        restored = read_handoff(CodeReviewContext('R-001', self.paths, 1).render())
+        self.assertIn('CR-001 未关闭', restored)
+        self.assertIn('logout.log', restored)
+        self.assertIn('增量复审', restored)
 
     def write(self, key, text):
         Path(self.paths[key]).write_text(text, encoding='utf-8')
@@ -53,11 +69,12 @@ class IncrementalReviewTests(unittest.TestCase):
         self.write('develop', 'CR-001：Login.kt onClick 接线；影响 AC-01；login.log 退出码 0')
         return '已修复 CR-001，修改 Login.kt，退出流程未变'
 
-    def test_first_review_is_full_and_device_lifecycle_belongs_to_developer(self):
+    def test_first_review_allows_script_managed_device_for_code_review(self):
         self.pipeline._run_item(self.item(), self.dev, self.reviewer)
         message = read_handoff(self.reviewer.send_message.call_args.args[0])
         self.assertIn('首审', message)
-        self.assertIn('Reviewer 不得接手启停设备', message)
+        self.assertIn('Code Review 可调用统一脚本', message)
+        self.assertNotIn('Reviewer 不得接手启停设备', message)
         self.assertNotIn('否则检查/启动 AVD', message)
         self.assertIn('修复改动清单', self.dev.send_message.call_args.args[0])
         self.assertNotIn('仅对既有问题', message)
@@ -87,6 +104,9 @@ class IncrementalReviewTests(unittest.TestCase):
 
     def test_restart_keeps_review_snapshot_even_if_reports_are_overwritten(self):
         self.interrupt_after_review()
+        self.assertFalse((Path(self.pipeline.requirements_dir) / 'handoffs').exists())
+        copies = [p for p in Path(self.paths['workspace']).rglob('*.txt') if p.read_text() == REJECT]
+        self.assertEqual(len(copies), 1)
         self.write('test', '开发者覆盖的当前自测')
         self.write('code_review', '')
         restarted = BreakPipeline(self.pipeline.work_dir, skip_human=True)

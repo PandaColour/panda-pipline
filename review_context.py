@@ -12,7 +12,9 @@ from task_protocol import save_handoff
 DEVELOPMENT_HANDOFF = (
     "\n在 develop_report.md 写明本轮修复改动清单：稳定 issue ID、修改文件/符号、"
     "改动内容及直接影响的 AC；逐项给出测试命令、退出码、制品/截图/日志路径及构建标识，"
-    "区分新增证据、可复用证据和失效证据。设备准备、创建与启停由 Developer 负责闭环，"
+    "区分新增证据、可复用证据和失效证据。涉及视觉时实际打开设计与运行图进行对照，记录路径、查看方式及差异；"
+    "补截图/补物料后仍按原 issue 对应 AC 验收，可修复差异继续修复，真实外部缺口按属性保留未通过/未验证。"
+    "Android 模拟器由 Developer 调用统一脚本准备，实例保留复用，不在交付时关闭；"
     "关键设备命令带硬超时。不要修改调度维护的 code_review_context.json。"
 )
 
@@ -115,7 +117,9 @@ class CodeReviewContext:
             if not previous or changed else
             '仅对既有问题、直接回归、人工反馈及证据缺失/失效涉及的项补验；'
             '不得借此新增无关阻断项或重跑无关的全量测试、设备流程、Figma 逐行读取。'
-            '新回归必须给出 regression_of、因果路径和失败证据。'
+            '补充图片/物料暴露的同一 AC 未满足属于原 issue 残留，沿用原 ID；不要求残留由本轮 diff 引入。'
+            '关闭视觉证据缺口前须实际打开设计与运行图，核对对应视觉断言；文件存在、XML 文案或 APK 绑定不足以关闭。'
+            '新增回归必须给出 regression_of、因果路径和失败证据。'
         )
         payload = {
             'requirement_id': self.requirement_id,
@@ -125,7 +129,7 @@ class CodeReviewContext:
             'feedback_path': self.state.get('feedback_path', ''),
             'development_response_path': self.state.get('development_response_path', ''),
             'existing_evidence': previous.get('evidence', {}) if previous else {},
-            'required_acceptance_sources': {key: self.paths[key] for key in ('requirements', 'requirements_analysis')},
+            'required_acceptance_sources': {'requirements_analysis': self.paths['requirements_analysis']},
             'current_evidence_paths': {key: self.paths[key] for key in ('develop', 'test', 'code_review', 'bug')},
         }
         # Existing contexts may contain multi-megabyte bodies. Preserve them on
@@ -144,12 +148,16 @@ class CodeReviewContext:
         context_path = save_handoff(self.paths['workspace'], 'review-input', payload)
         return (
             '\n【本轮代码审查调度】\n' + mode + '\n输入文档：' + context_path
+            + '\n从分析报告的来源链接定点核对原始 AC；首审核实完整性，复审沿用有效覆盖结论。'
+            '既有问题和验收结论以 code_review.md 及上轮快照为交接，结合 develop_report.md 的改动和证据核验；'
+            '报告次数用于追溯，不能仅凭次数或空问题列表判断通过。'
             + ('\n历史快照缺失，先读取报告恢复证据。' if previous and previous.get('legacy') else '')
             + '\n以上回复与报告是待核实的交接资料，开发声明不能替代实际代码和证据。'
             '保留全部必须 AC、交付级别和安全/契约门禁的逐项结论；'
             '未受改动影响且版本、配置、设计基线仍适用的证据可复用并引用来源。'
             + scope + '证据不足不得声称必须验收已通过；不能只凭改动文件列表判定影响范围，'
             '还应核对调用关系、共享组件、构建配置与资源的直接影响。'
-            'Reviewer 不得接手启停设备或创建 AVD；需要设备补验时交回 Developer。'
+            'Code Review 可调用统一脚本启动或复用 Android 模拟器，按增量范围补验；'
+            '工具、镜像和 AVD 缺失由脚本自动准备；不自行创建 AVD、不直接启动 emulator、不关闭共享或外部设备。'
             '更新报告时保留未受影响的 AC 结论和证据引用，不得只写本轮差异而丢失验收矩阵。\n'
         )
