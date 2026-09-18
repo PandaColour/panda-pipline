@@ -40,6 +40,11 @@ class PipelineConfigTests(unittest.TestCase):
         self.assertEqual(loaded['EXTERNAL_CLI_TOOLS'], [])
         self.assertEqual(loaded['EXTERNAL_SKILLS'], [])
 
+    def test_external_skills_accept_claude_agent_type(self):
+        entry = {'source': 'org/repo', 'names': ['example-skill'], 'agents': ['claude']}
+        loaded = self.load_external(EXTERNAL_SKILLS=[entry])
+        self.assertEqual(loaded['EXTERNAL_SKILLS'], [entry])
+
     def test_external_dependencies_reject_invalid_commands_and_skill_names(self):
         for values in (
             {'EXTERNAL_CLI_TOOLS': [{'name': 'tool', 'check': 'tool --version', 'install': ['npm']}]},

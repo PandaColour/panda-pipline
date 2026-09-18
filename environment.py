@@ -59,7 +59,7 @@ def _external_skill_inventory(work_dir):
 
 
 def _external_skills_ready(entry, inventory):
-    agents = entry.get('agents', ['codex', 'claude-code', 'cursor'])
+    agents = entry.get('agents', ['codex', 'claude', 'cursor'])
     required_agents = {EXTERNAL_SKILL_AGENT_NAMES[agent] for agent in agents}
     return all(any(
         row['name'] == name and row.get('source') == entry['source']
@@ -110,8 +110,11 @@ def _prepare_external_dependencies(work_dir):
         try:
             if not _external_skills_ready(entry, inventory):
                 print(f'  📦 安装外部 skills: {entry["source"]}')
+                # The skills CLI uses claude-code; pipeline configuration uses claude.
+                agents = ['claude-code' if agent == 'claude' else agent
+                          for agent in entry.get('agents', ['codex', 'claude', 'cursor'])]
                 command = ['npx', '--yes', 'skills', 'add', entry['source'], '-y', '-g',
-                           '--agent', *entry.get('agents', ['codex', 'claude-code', 'cursor'])]
+                           '--agent', *agents]
                 result = _external_command(command, work_dir, timeout=300)
                 if result.returncode:
                     raise RuntimeError('skills 安装失败')

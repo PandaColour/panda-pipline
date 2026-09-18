@@ -124,7 +124,7 @@
       ],
       "agents": [
         "codex",
-        "claude-code",
+        "claude",
         "cursor"
       ]
     }

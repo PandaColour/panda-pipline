@@ -10,7 +10,7 @@ import environment
 
 class ExternalDependencyTests(unittest.TestCase):
     cli = {'name': 'example', 'check': ['example', '--version'], 'install': ['npm', 'install', '-g', 'example']}
-    skill = {'source': 'org/repo', 'names': ['example-skill'], 'agents': ['codex', 'claude-code', 'cursor']}
+    skill = {'source': 'org/repo', 'names': ['example-skill'], 'agents': ['codex', 'claude', 'cursor']}
 
     def setUp(self):
         for patcher in (

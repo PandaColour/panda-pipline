@@ -8,7 +8,7 @@ SYSTEM_PROMPT_DIR = os.path.join(SOURCE_REPO_DIR, "system-prompt")
 
 PIPELINE_CONFIG_PATH = os.path.join(SOURCE_REPO_DIR, "config", "config.json")
 EXTERNAL_SKILL_AGENT_NAMES = {
-    'codex': 'Codex', 'claude-code': 'Claude Code', 'cursor': 'Cursor', 'opencode': 'OpenCode',
+    'codex': 'Codex', 'claude': 'Claude Code', 'cursor': 'Cursor', 'opencode': 'OpenCode',
 }
 
 
@@ -59,7 +59,7 @@ def _external_dependencies(runtime_config, key):
             if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', identity) or identity.startswith('-'):
                 raise ValueError(f'{field}.source must use GitHub owner/repo format')
             _string_array(entry.get('names'), f'{field}.names')
-            agents = entry.get('agents', ['codex', 'claude-code', 'cursor'])
+            agents = entry.get('agents', ['codex', 'claude', 'cursor'])
             _string_array(agents, f'{field}.agents')
             if any(agent not in EXTERNAL_SKILL_AGENT_NAMES for agent in agents):
                 raise ValueError(f'{field}.agents contains an unsupported agent')

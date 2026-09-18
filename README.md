@@ -145,7 +145,7 @@ source .venv/bin/activate  # Windows 使用 .venv\Scripts\activate
     {
       "source": "larksuite/cli",
       "names": ["lark-shared", "lark-doc", "lark-wiki"],
-      "agents": ["codex", "claude-code", "cursor"]
+      "agents": ["codex", "claude", "cursor"]
     }
   ]
 }
@@ -155,7 +155,7 @@ source .venv/bin/activate  # Windows 使用 .venv\Scripts\activate
 
 CLI 可选 `verify` 数组，每项包含 `command` 参数数组和 `contains` 非空字符串数组；在安装/版本检查通过后执行，要求退出码为 0 且输出包含全部指定内容，每项最多 15 秒。能力不足仅提示，不循环重装。可选 `path_env` 指定 `PANDA_PIPELINE_` 前缀的环境变量；全部检查通过才写入 `check` 命令的可执行文件绝对路径，失败/禁用为空，供 Agent 安全复用同一个工具。省略这些字段时仍是普通的检查、缺失安装流程。
 
-外部 skills 通过 `npx --yes skills ls -g --json` 一次读取全局清单，按 `source`（GitHub `owner/repo`）、`names` 中全部必需项和每个目标 Agent 的关联判断。`agents` 支持 `codex`、`claude-code`、`cursor`、`opencode`，省略时默认前三项。缺失时执行 `npx --yes skills add <source> -y -g --agent <agents...>`，安装该来源的整套技能；`names` 是最低验收清单，不是安装筛选器，也不保证已同步远程新发布的所有技能。需要保证某项存在就在 `names` 中列出，不用单个哨兵代替全部必需项。安装后重新查询，检查仍失败不宣称成功。清单超时、非 JSON 或缺少来源信息时不盲目安装；不会每次联网枚举远程技能或自动更新。来源与命令参考 [skills CLI](https://github.com/vercel-labs/skills) 和 [Lark CLI](https://github.com/larksuite/cli)。
+外部 skills 通过 `npx --yes skills ls -g --json` 一次读取全局清单，按 `source`（GitHub `owner/repo`）、`names` 中全部必需项和每个目标 Agent 的关联判断。`agents` 支持 `codex`、`claude`、`cursor`、`opencode`，省略时默认前三项。缺失时执行 `npx --yes skills add <source> -y -g --agent <agents...>`，安装该来源的整套技能；`names` 是最低验收清单，不是安装筛选器，也不保证已同步远程新发布的所有技能。需要保证某项存在就在 `names` 中列出，不用单个哨兵代替全部必需项。安装后重新查询，检查仍失败不宣称成功。清单超时、非 JSON 或缺少来源信息时不盲目安装；不会每次联网枚举远程技能或自动更新。来源与命令参考 [skills CLI](https://github.com/vercel-labs/skills) 和 [Lark CLI](https://github.com/larksuite/cli)。
 
 `skills add larksuite/cli` 安装的是技能说明，CLI 本体需单独配置；业务账号认证也另行处理。这里管理的是全局第三方技能，现有 `panda-pipeline-*` 技能仍从仓库 `skills/` 渲染并覆盖安装到业务项目。Android CLI 也使用同一外部 CLI 列表；具体安装来源和能力检查见上文及示例配置，不通过 npx 安装。
 
